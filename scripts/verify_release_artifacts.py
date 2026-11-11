@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""Verify the release artifact manifest before publishing.
+"""Verify a miniddns release artifact tree before publishing.
 
-The release tarball must contain the runnable binary, the configuration
-example, the install script, and server configuration examples (systemd and
-OpenWrt), plus the CA snapshot, docs, license notices and checksums.
+Every platform/libc package must be a self-contained install prefix: the
+runnable binary, configuration examples, install script and systemd/OpenWrt
+service configuration examples all live INSIDE the directory that is packed
+into the tarball. Nothing is uploaded as a loose release asset.
 
 All output is English per CONTRIBUTING.md.
 """
 import argparse
 import hashlib
 import os
+import platform
 import struct
 import subprocess
 import sys
 
 REQUIRED_FILES = [
     "bin/miniddns",
+    "README.md",
     "conf/miniddns.conf.example",
     "conf/README.md",
     "install.sh",
@@ -38,25 +41,36 @@ REQUIRED_FILES = [
     "SHA256SUMS",
 ]
 
+# Allowed entries directly under the artifact root. This guards the directory
+# structure so installation/configuration files never end up outside the
+# tarball layout.
+ALLOWED_TOP_LEVEL = {
+    "bin", "conf", "examples", "install.sh", "README.md", "systemd",
+    "openwrt", "ca", "doc", "LICENSES", "THIRD_PARTY_NOTICES.md",
+    "SHA256SUMS",
+}
+
 EXECUTABLE_FILES = [
     "bin/miniddns",
     "install.sh",
     "openwrt/files/miniddns.init",
 ]
 
-FORBIDDEN_BASENAMES = ("miniddns.conf",)
-FORBIDDEN_SUFFIXES = (".token",)
-FORBIDDEN_PREFIXES = (".git",)
-FORBIDDEN_DIRS = ("build",)
+HOST_ARCH = {
+    "x86_64": "x64", "amd64": "x64",
+    "i386": "x86", "i486": "x86", "i586": "x86", "i686": "x86",
+    "aarch64": "arm64", "arm64": "arm64",
+    "armv7l": "arm32", "armv6l": "arm32", "arm": "arm32",
+}
 
 
-def is_static_elf(path):
-    """True when the ELF image has no PT_INTERP program header."""
+def has_interp(path):
+    """True when the ELF image has a PT_INTERP program header (dynamic)."""
     try:
         with open(path, "rb") as f:
             data = f.read(65536)
         if data[:4] != b"\x7fELF":
-            return False
+            return None
         is64 = data[4] == 2
         endian = "<" if data[5] == 1 else ">"
         if is64:
@@ -68,16 +82,16 @@ def is_static_elf(path):
             phentsize = struct.unpack_from(endian + "H", data, 42)[0]
             phnum = struct.unpack_from(endian + "H", data, 44)[0]
         if not phentsize or phnum > 4096:
-            return False
+            return None
         for i in range(phnum):
             off = phoff + i * phentsize
             if off + 4 > len(data):
-                return False
+                return None
             if struct.unpack_from(endian + "I", data, off)[0] == 3:  # PT_INTERP
-                return False
-        return True
-    except (OSError, struct.error):
+                return True
         return False
+    except (OSError, struct.error):
+        return None
 
 
 def sha256(path):
@@ -92,6 +106,8 @@ def main():
     ap = argparse.ArgumentParser(description="Verify a miniddns dist artifact tree")
     ap.add_argument("--dist", required=True, help="path to the dist artifact root")
     ap.add_argument("--version", required=True, help="expected binary version")
+    ap.add_argument("--arch", default="x64", choices=["x86", "x64", "arm32", "arm64"])
+    ap.add_argument("--libc", default="musl", choices=["musl", "glibc"])
     ap.add_argument("--skip-run", action="store_true", help="do not execute the binary")
     args = ap.parse_args()
 
@@ -99,9 +115,18 @@ def main():
     problems = []
     checked = 0
 
+    expected_id = "miniddns-%s-linux-%s-%s" % (args.version, args.arch, args.libc)
+    if os.path.basename(root) != expected_id:
+        problems.append("artifact directory name must be %s (got %s)"
+                        % (expected_id, os.path.basename(root)))
+
     if not os.path.isdir(root):
         print("ERROR: dist root does not exist: %s" % root, file=sys.stderr)
         return 1
+
+    for name in sorted(os.listdir(root)):
+        if name not in ALLOWED_TOP_LEVEL:
+            problems.append("unexpected top-level entry: %s" % name)
 
     for rel in REQUIRED_FILES:
         path = os.path.join(root, rel)
@@ -117,20 +142,19 @@ def main():
         if os.path.isfile(path) and not os.access(path, os.X_OK):
             problems.append("not executable: %s" % rel)
 
-    for dirpath, dirnames, filenames in os.walk(root):
-        for d in dirnames:
-            if d in FORBIDDEN_DIRS:
-                problems.append("forbidden directory: %s" % os.path.relpath(os.path.join(dirpath, d), root))
-        for name in filenames:
-            if name in FORBIDDEN_BASENAMES or name.endswith(FORBIDDEN_SUFFIXES) \
-                    or name.startswith(FORBIDDEN_PREFIXES):
-                problems.append("forbidden file: %s" % os.path.relpath(os.path.join(dirpath, name), root))
-
     binary = os.path.join(root, "bin/miniddns")
     if os.path.isfile(binary):
-        if not is_static_elf(binary):
-            problems.append("bin/miniddns is not a static ELF binary")
-        if not args.skip_run:
+        interp = has_interp(binary)
+        if interp is None:
+            problems.append("bin/miniddns is not a valid ELF binary")
+        elif args.libc == "musl" and interp:
+            problems.append("musl build must be fully static (PT_INTERP present)")
+        elif args.libc == "glibc" and not interp:
+            problems.append("glibc build must be dynamically linked (no PT_INTERP)")
+
+        host = HOST_ARCH.get(platform.machine().lower(), "")
+        runnable = (not args.skip_run) and host == args.arch
+        if runnable:
             try:
                 out = subprocess.check_output([binary, "--version"], text=True, timeout=15)
                 first = out.splitlines()[0] if out.splitlines() else ""
@@ -139,6 +163,13 @@ def main():
                                     % (args.version, first.strip()))
             except (OSError, subprocess.SubprocessError) as exc:
                 problems.append("cannot run bin/miniddns --version: %s" % exc)
+        else:
+            # Cross-architecture: the version string is still embedded literally.
+            with open(binary, "rb") as f:
+                blob = f.read()
+            if args.version.encode() not in blob:
+                problems.append("version string %r not found in cross-built binary"
+                                % args.version)
 
     sums_path = os.path.join(root, "SHA256SUMS")
     if os.path.isfile(sums_path):
@@ -168,9 +199,9 @@ def main():
                 problems.append("checksum mismatch: %s" % rel)
         checked += len(listed)
 
-    print("Artifact root: %s" % root)
-    print("Required files checked: %d" % len(REQUIRED_FILES))
-    print("Checksums checked: %d" % max(0, checked - len(REQUIRED_FILES)))
+    print("Artifact:  %s" % os.path.basename(root))
+    print("Platform:  linux / %s / %s" % (args.arch, args.libc))
+    print("Files:     %d required, %d checksums" % (len(REQUIRED_FILES), max(0, checked - len(REQUIRED_FILES))))
     if problems:
         for p in problems:
             print("ERROR: %s" % p, file=sys.stderr)

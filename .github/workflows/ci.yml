@@ -18,14 +18,21 @@ jobs:
   build-and-test:
     name: Build and test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ZIG_VERSION: 0.13.0
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install Zig cross compiler
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/zig.tar.xz" \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          mkdir -p "${RUNNER_TEMP}/zig"
+          tar -xJf "${RUNNER_TEMP}/zig.tar.xz" -C "${RUNNER_TEMP}/zig" --strip-components=1
+          "${RUNNER_TEMP}/zig/zig" version
 
       - name: Build
         run: make -j"$(nproc)"
@@ -41,13 +48,25 @@ jobs:
       - name: Sanitizer build and tests
         run: make test-asan
 
-      - name: Verify the release artifact layout
-        run: make dist VERSION=0.0.0-rc${{ github.run_number }}
+      - name: Verify release artifacts for both libc variants
+        run: |
+          set -euo pipefail
+          V="0.0.0-rc${GITHUB_RUN_NUMBER}"
+          ZIG="${RUNNER_TEMP}/zig/zig"
+          make dist VERSION="${V}" TARGET_ARCH=x64 LIBC=musl \
+               ZIG_TARGET=x86_64-linux-musl ZIG="${ZIG}"
+          make dist VERSION="${V}" TARGET_ARCH=x64 LIBC=glibc \
+               ZIG_TARGET=x86_64-linux-gnu ZIG="${ZIG}"
+          mkdir -p build/release-assets
+          for id in "miniddns-${V}-linux-x64-musl" "miniddns-${V}-linux-x64-glibc"; do
+            tar -czf "build/release-assets/${id}.tar.gz" -C dist "${id}"
+          done
+          ls -1 build/release-assets
 
-      - name: Upload dist artifact
+      - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:
           name: miniddns-ci-${{ github.run_number }}
-          path: dist/
+          path: build/release-assets/
           if-no-files-found: error
           retention-days: 7

@@ -12,6 +12,8 @@
 
 - Automated release pipeline: tag creation, CI/CD build, generated changelog and GitHub Release publishing, for stable (`X.Y.Z`) and release-candidate (`X.Y.Z-rcN`) versions. See `docs/RELEASE_PROCESS.md`.
 - Release artifacts now explicitly bundle the static binary, configuration examples, the install script and systemd/OpenWrt service configuration examples; the manifest is verified by `scripts/verify_release_artifacts.py`.
+- Multi-platform packaging: eight Linux tarballs (x86/x64/arm32/arm64 × musl/glibc) built with Zig cross compilation; musl builds are static, glibc builds are dynamic. See `docs/RELEASE_PROCESS.md`.
+- Each tarball is now a self-contained install prefix (`README.md`, `bin/`, `conf/`, `examples/`, `install.sh`, `systemd/`, `openwrt/`, `ca/`, `doc/`, `LICENSES/`, `SHA256SUMS`). Only tarballs and the aggregate `SHA256SUMS` are published as release assets; installation and configuration files are no longer uploaded loose.
 
 <!-- generated-release-sections -->
 

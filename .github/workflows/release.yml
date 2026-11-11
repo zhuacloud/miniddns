@@ -22,23 +22,28 @@ concurrency:
 
 jobs:
   release:
-    name: Tag, build, changelog and publish
+    name: Tag, build 8 packages, changelog and publish
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       VERSION: ${{ inputs.version }}
       DRY_RUN: ${{ inputs.dry_run }}
       GH_TOKEN: ${{ github.token }}
+      ZIG_VERSION: 0.13.0
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install build dependencies
+      - name: Install Zig cross compiler
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools
+          set -euo pipefail
+          curl -fsSL -o "${RUNNER_TEMP}/zig.tar.xz" \
+            "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          mkdir -p "${RUNNER_TEMP}/zig"
+          tar -xJf "${RUNNER_TEMP}/zig.tar.xz" -C "${RUNNER_TEMP}/zig" --strip-components=1
+          "${RUNNER_TEMP}/zig/zig" version
 
       - name: Validate version input
         id: validate
@@ -76,15 +81,41 @@ jobs:
           git push origin "refs/tags/${VERSION}"
           echo "Created tag ${VERSION}"
 
-      - name: Build, test and package
+      - name: Build, test and package all platforms
         run: |
           set -euo pipefail
+          ZIG="${RUNNER_TEMP}/zig/zig"
           make -j"$(nproc)"
           make spec-check
           make verify-units
           make test
           make test-asan
-          make dist VERSION="${VERSION}"
+          mkdir -p build/release-assets
+          PLATFORMS="
+            x86:x86-linux-musl:musl
+            x86:x86-linux-gnu:glibc
+            x64:x86_64-linux-musl:musl
+            x64:x86_64-linux-gnu:glibc
+            arm32:arm-linux-musleabihf:musl
+            arm32:arm-linux-gnueabihf:glibc
+            arm64:aarch64-linux-musl:musl
+            arm64:aarch64-linux-gnu:glibc
+          "
+          for entry in ${PLATFORMS}; do
+            arch="${entry%%:*}"
+            rest="${entry#*:}"
+            target="${rest%%:*}"
+            libc="${rest##*:}"
+            echo "::group::Building linux/${arch}/${libc} (${target})"
+            make dist VERSION="${VERSION}" TARGET_ARCH="${arch}" LIBC="${libc}" \
+                 ZIG_TARGET="${target}" ZIG="${ZIG}"
+            id="miniddns-${VERSION}-linux-${arch}-${libc}"
+            tar -czf "build/release-assets/${id}.tar.gz" -C dist "${id}"
+            echo "::endgroup::"
+          done
+          (cd build/release-assets && sha256sum *.tar.gz > SHA256SUMS)
+          echo "Built packages:"
+          ls -1 build/release-assets
 
       - name: Generate changelog and release notes
         run: |
@@ -102,22 +133,9 @@ jobs:
             fi
           fi
 
-      - name: Create release assets
-        run: |
-          set -euo pipefail
-          ARCH="$(uname -m)"
-          D="miniddns-${VERSION}-${ARCH}-musl"
-          mkdir -p build/release-assets
-          tar -czf "build/release-assets/${D}.tar.gz" -C dist "${D}"
-          (cd build/release-assets && sha256sum "${D}.tar.gz" > "${D}.tar.gz.sha256")
-          cp "dist/${D}/SHA256SUMS"       build/release-assets/SHA256SUMS
-          cp "dist/${D}/install.sh"       build/release-assets/install.sh
-          cp "dist/${D}/conf/miniddns.conf.example" build/release-assets/miniddns.conf.example
-          cp "dist/${D}/systemd/miniddns.service"   build/release-assets/miniddns.service
-          cp build/RELEASE_NOTES.md      build/release-assets/RELEASE_NOTES.md
-          echo "Assets for ${D}:"
-          ls -1 build/release-assets
-
+      # Only the tarballs and the aggregate checksum file are published.
+      # install.sh, configuration examples and service configuration examples
+      # are INSIDE each tarball, never loose release assets.
       - name: Publish GitHub release
         if: ${{ inputs.dry_run == false }}
         run: |
@@ -129,13 +147,8 @@ jobs:
           fi
           gh release create "${VERSION}" "${args[@]}" \
             build/release-assets/*.tar.gz \
-            build/release-assets/*.tar.gz.sha256 \
-            build/release-assets/SHA256SUMS \
-            build/release-assets/RELEASE_NOTES.md \
-            build/release-assets/install.sh \
-            build/release-assets/miniddns.conf.example \
-            build/release-assets/miniddns.service
-          echo "Published release ${VERSION}"
+            build/release-assets/SHA256SUMS
+          echo "Published release ${VERSION} with 8 platform packages"
 
       - name: Dry-run summary
         if: ${{ inputs.dry_run == true }}
@@ -144,6 +157,10 @@ jobs:
             echo "## Dry run for ${VERSION}"
             echo ""
             echo "No tag, commit or GitHub release was created."
+            echo ""
+            echo "### Packages built"
+            echo ""
+            ls -1 build/release-assets/*.tar.gz
             echo ""
             cat build/RELEASE_NOTES.md
           } >> "${GITHUB_STEP_SUMMARY}"
@@ -156,5 +173,6 @@ jobs:
             echo ""
             echo "- Tag: \`${VERSION}\`"
             echo "- Prerelease: ${{ steps.validate.outputs.prerelease }}"
-            echo "- Artifacts: tarball, SHA256SUMS, install.sh, config example, systemd unit, release notes"
+            echo "- Packages: 8 tarballs (x86/x64/arm32/arm64 x musl/glibc) + SHA256SUMS"
+            echo "- All installation and configuration files are inside each tarball"
           } >> "${GITHUB_STEP_SUMMARY}"

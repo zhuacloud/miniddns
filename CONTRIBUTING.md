@@ -63,14 +63,18 @@ and are fully documented in `docs/RELEASE_PROCESS.md`. That document defines:
 
 - the version scheme (`X.Y.Z` stable, `X.Y.Z-rcN` release candidate),
 - the tag → build → changelog → publish pipeline,
-- the **release artifact manifest**: every release must bundle the runnable
-  static binary, the configuration example, the install script and the server
-  configuration examples (systemd and OpenWrt), enforced by
+- the **platform matrix**: eight Linux packages (x86/x64/arm32/arm64 ×
+  musl/glibc), cross compiled with Zig,
+- the **release artifact manifest**: every tarball is a self-contained
+  install prefix bundling the runnable binary, the configuration example,
+  the install script and the server configuration examples (systemd and
+  OpenWrt). Installation/configuration files are only ever inside the
+  tarball, never loose release assets. Enforced by
   `scripts/verify_release_artifacts.py`,
 - the English-only rule for generated changelogs, release notes and tags.
 
 `.github/workflows/ci.yml` builds and tests every push/PR to `main` and
-verifies the artifact layout without publishing anything.
+verifies both native libc artifact layouts without publishing anything.
 
 ## Technical contributions
 

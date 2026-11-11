@@ -110,6 +110,7 @@ release_assets = [
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
     "conf/README.md",
+    "ARTIFACT_README.md",
     "examples/README.md",
     "examples/miniddns.conf.minimal.example",
     "examples/miniddns.conf.multi-instance.example",
@@ -126,10 +127,22 @@ if os.path.exists(release_yml):
         problems.append("release workflow must build with an explicit VERSION")
     if "--prerelease" not in ry:
         problems.append("release workflow must support RC prereleases")
+    for target in ("x86-linux-musl", "x86_64-linux-musl",
+                   "arm-linux-musleabihf", "aarch64-linux-musl",
+                   "x86-linux-gnu", "x86_64-linux-gnu",
+                   "arm-linux-gnueabihf", "aarch64-linux-gnu"):
+        if target not in ry:
+            problems.append("release workflow is missing target %s" % target)
+    if "build/release-assets/install.sh" in ry or \
+            "build/release-assets/miniddns.conf.example" in ry:
+        problems.append("install/config files must not be loose release assets")
 if "verify_release_artifacts.py" not in makefile:
     problems.append("Makefile dist must verify the release artifact manifest")
 if "build/version.h" not in makefile or "MN_USE_GENERATED_VERSION" not in makefile:
     problems.append("Makefile must inject VERSION into the binary via build/version.h")
+for token in ("TARGET_ARCH", "LIBC", "ZIG_TARGET", "ARTIFACT_ID"):
+    if token not in makefile:
+        problems.append("Makefile must support multi-platform packaging (%s)" % token)
 notes.append("release pipeline OK")
 
 print("spec-check: %d notes" % len(notes))

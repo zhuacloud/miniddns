@@ -1,13 +1,24 @@
 # miniddns — build (design.md §13.1, with -ffunction-sections for the 500 KB budget)
 CC       ?= cc
-# Static artifacts are sized for musl; prefer a musl toolchain when present.
-STATIC_CC ?= $(shell command -v musl-gcc 2>/dev/null || echo $(CC))
 CSTD     ?= -std=c99
 WARN     ?= -Wall -Wextra -Wno-unused-parameter
 HARDEN   ?= -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -fno-plt
 OPT      ?= -O2
 VERSION  ?= 1.2.0
 REPO     ?= zhuacloud/miniddns
+# Release artifact identity: linux + arch (x86/x64/arm32/arm64) + libc (musl/glibc).
+TARGET_ARCH ?= x64
+LIBC        ?= musl
+ZIG         ?= zig
+ZIG_TARGET  ?=
+ifeq ($(strip $(ZIG_TARGET)),)
+BUILD_CC = $(CC)
+STATIC_CC ?= $(shell command -v musl-gcc 2>/dev/null || echo $(CC))
+else
+BUILD_CC = $(ZIG) cc -target $(ZIG_TARGET)
+STATIC_CC := $(BUILD_CC)
+endif
+ARTIFACT_ID = miniddns-$(VERSION)-linux-$(TARGET_ARCH)-$(LIBC)
 DEFS     ?= -DBR_USE_URANDOM -D_GNU_SOURCE -D_DEFAULT_SOURCE
 # The release version is injected through a generated header (build/version.h),
 # never through a quoted -D macro: quoted defines lose their quotes when CFLAGS
@@ -17,7 +28,7 @@ DEFS     += -DMN_USE_GENERATED_VERSION=1
 # (linux/if_addr.h, linux/rtnetlink.h, asm/types.h). Exposing /usr/include
 # directly would mix glibc headers into a musl build, so stage only the UAPI
 # trees in build/uapi and add that directory to the include path.
-MACHINE  := $(shell $(CC) -dumpmachine 2>/dev/null || echo x86_64-linux-gnu)
+MACHINE  := $(shell cc -dumpmachine 2>/dev/null || echo x86_64-linux-gnu)
 UAPI_DIR  = build/uapi
 KERNEL_ASM = /usr/include/$(MACHINE)/asm
 UAPI_STAMP = $(UAPI_DIR)/.stamp
@@ -27,8 +38,6 @@ CFLAGS   += $(CSTD) $(WARN) $(HARDEN) $(OPT) $(DEFS) $(INC) $(SECTS)
 # BearSSL is upstream code; keep our own -Wall -Wextra clean while not failing on it.
 CFLAGS_VENDOR += $(CSTD) $(OPT) $(DEFS) $(INC) $(SECTS) -w
 LDFLAGS  += -pie -Wl,-z,relro,-z,now -Wl,--gc-sections
-
-ARCH     ?= $(shell uname -m)
 
 APP_SRC  := $(wildcard src/*.c)
 BR_SRC   := $(shell find third_party/bearssl/src -name '*.c' | sort)
@@ -54,7 +63,8 @@ changelog:
 	        --changelog CHANGELOG.md --notes build/RELEASE_NOTES.md
 
 verify-artifacts:
-	@python3 scripts/verify_release_artifacts.py --dist $(DIST) --version $(VERSION)
+	@python3 scripts/verify_release_artifacts.py --dist $(DIST) --version $(VERSION) \
+	        --arch $(TARGET_ARCH) --libc $(LIBC)
 
 all: build/miniddns
 
@@ -95,7 +105,7 @@ $(APP_OBJ): build/version.h $(UAPI_STAMP)
 # not track flag changes, and -fPIE objects must not leak into a -no-pie link.
 static:
 	rm -rf build
-	@if ! command -v musl-gcc >/dev/null 2>&1; then \
+	@if [ -z "$(ZIG_TARGET)" ] && ! command -v musl-gcc >/dev/null 2>&1; then \
 	  echo "WARN: musl-gcc not found; a glibc -static binary exceeds the 500 KB budget (§13.2). Use STATIC_CC=<musl toolchain>."; \
 	fi
 	$(MAKE) CC="$(STATIC_CC)" OPT="$(OPT) -fno-pie" \
@@ -178,10 +188,20 @@ print-ip: all
 	./build/miniddns --print-ip
 
 # ---- dist ----
-DIST := dist/miniddns-$(VERSION)-$(ARCH)-musl
+DIST := dist/$(ARTIFACT_ID)
+# Build the binary for the requested platform/libc, then assemble a
+# self-contained prefix directory. Everything an operator needs (binary,
+# config examples, install script, systemd/OpenWrt service examples) lives
+# inside $(DIST) and therefore inside the release tarball.
 dist: verify-units doc
-	$(MAKE) static
-	rm -rf $(DIST)
+	rm -rf build $(DIST)
+	@if [ "$(LIBC)" = "musl" ]; then \
+	  $(MAKE) static; \
+	 elif [ "$(LIBC)" = "glibc" ]; then \
+	  $(MAKE) all CC="$(BUILD_CC)"; \
+	 else \
+	  echo "FATAL: LIBC must be musl or glibc"; exit 1; \
+	 fi
 	$(MAKE) ca-refresh
 	install -Dm0755 build/miniddns $(DIST)/bin/miniddns
 	install -Dm0644 conf/miniddns.conf.example $(DIST)/conf/miniddns.conf.example
@@ -194,6 +214,7 @@ dist: verify-units doc
 	install -Dm0644 doc/design.md           $(DIST)/doc/design.md
 	@[ -f doc/design.html ] && install -Dm0644 doc/design.html $(DIST)/doc/design.html || true
 	install -Dm0755 install.sh              $(DIST)/install.sh
+	install -Dm0644 ARTIFACT_README.md      $(DIST)/README.md
 	install -Dm0644 THIRD_PARTY_NOTICES.md  $(DIST)/THIRD_PARTY_NOTICES.md
 	install -Dm0644 LICENSE                 $(DIST)/LICENSES/miniddns-MIT.txt
 	install -Dm0644 THIRD_PARTY_NOTICES.md  $(DIST)/LICENSES/THIRD_PARTY_NOTICES.md
@@ -204,7 +225,8 @@ dist: verify-units doc
 	  || (echo "FATAL: artifact contains forbidden files"; exit 1)
 	@test -s $(DIST)/LICENSES/bearssl-MIT.txt && test -s $(DIST)/LICENSES/jsmn-MIT.txt \
 	  || (echo "FATAL: missing third-party license notices"; exit 1)
-	@python3 scripts/verify_release_artifacts.py --dist $(DIST) --version $(VERSION)
+	@python3 scripts/verify_release_artifacts.py --dist $(DIST) --version $(VERSION) \
+	        --arch $(TARGET_ARCH) --libc $(LIBC)
 	@echo "dist ok: $(DIST)"
 
 clean:

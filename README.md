@@ -100,14 +100,21 @@ full build/tests, generates an English changelog and publishes the GitHub
 Release. `dry_run=true` previews everything without tagging or publishing.
 See [`docs/RELEASE_PROCESS.md`](docs/RELEASE_PROCESS.md).
 
-The release tarball always contains the static binary, the configuration
-example, the install script and the server configuration examples (systemd
-unit/template/drop-in and OpenWrt procd), plus the CA snapshot, documentation,
-license notices and `SHA256SUMS`. The manifest is verified automatically by
-`scripts/verify_release_artifacts.py`.
+Each release publishes **eight Linux tarballs** — `x86`, `x64`, `arm32`,
+`arm64` × `musl` (fully static) / `glibc` (dynamic) — plus one aggregate
+`SHA256SUMS`. Cross compilation uses Zig. Only the tarballs and the checksum
+file are release assets: nothing is uploaded loose.
+
+Every tarball extracts to one self-contained install prefix, e.g.
+`miniddns-0.0.1-linux-x64-musl/`, containing `bin/miniddns`, the
+configuration examples, `install.sh`, the systemd/OpenWrt service
+configuration examples, the CA snapshot, docs, license notices and its own
+`SHA256SUMS`. Copy that directory to `/opt` or `/usr/local`, edit the config,
+and run — no extra files are needed. The manifest is verified automatically
+by `scripts/verify_release_artifacts.py`.
 
 Push and pull requests to `main` are built and tested by the **CI** workflow,
-which also verifies that the artifact tree can be produced.
+which also verifies both native libc artifact layouts.
 
 ## Contributing / repository rules
 

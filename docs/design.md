@@ -184,8 +184,10 @@ flowchart TD
 ### 发布产物布局（artifact root）
 
 ```
-miniddns-$(VERSION)-x86_64-musl/       # 完整清单以 §13.3 为准（单一事实源）
-├── bin/miniddns                     # 静态二进制，ldd => not a dynamic executable
+miniddns-$(VERSION)-linux-<arch>-<libc>/   # 完整清单以 §13.3 为准（单一事实源）
+│                                       # arch = x86|x64|arm32|arm64, libc = musl|glibc
+├── README.md                        # 自包含目录结构与快速上手（v1.2.3 新增）
+├── bin/miniddns                     # musl 版静态；glibc 版动态链接
 ├── conf/{miniddns.conf.example,README.md}   # 配置示例与说明；*注意* 不叫 miniddns.conf
 ├── examples/                        # 额外配置/服务器配置示例
 ├── ca/ca-certificates.crt           # 全量 CA 快照（兜底）
@@ -1462,8 +1464,9 @@ clean:
 ### 13.3 `make dist`
 
 ```
-dist/miniddns-$(VERSION)-$(ARCH)-musl/
-├── bin/miniddns                   # 静态二进制，可直接运行（发布产物核心）
+dist/miniddns-$(VERSION)-linux-<arch>-<libc>/   # 8 个平台/libc 组合，每个打成一个 tar.gz
+├── README.md                      # 目录结构与快速上手（来自 ARTIFACT_README.md）
+├── bin/miniddns                   # musl 静态 / glibc 动态（发布产物核心）
 ├── conf/
 │   ├── miniddns.conf.example     # 配置示例（不是 .conf）
 │   └── README.md                 # 安装/权限说明
@@ -1495,7 +1498,7 @@ dist/miniddns-$(VERSION)-$(ARCH)-musl/
 `make dist` 的完整步骤（已写在 §13.1 的 Makefile 里，顺序不可颠倒）：
 
 1. `verify-units` → 模板与成品一致
-2. `$(MAKE) static` → `bin/miniddns`
+2. 按 `TARGET_ARCH` / `LIBC` / `ZIG_TARGET` 交叉编译 → `bin/miniddns`（musl 走 `-static`，glibc 走动态链接；Zig 提供各目标的内核 UAPI 头）
 3. 复制 `systemd/`（含 `.service`/`.service.in`/drop-in 目录）、`openwrt/`、`conf/*.example` + `conf/README.md`、`examples/`、`doc/`、`install.sh`
 4. `make ca-refresh` → `ca/ca-certificates.crt` + `ca/README`（含 sha256）
 5. 复制 `LICENSES/`（项目与两个 vendor 组件的 MIT 声明）
@@ -1808,6 +1811,7 @@ root 模式（默认）：
 
 | 版本 | 变更 |
 | --- | --- |
+| 1.2.3 | 打包格式修正（§03 / §13.3）：每个版本发布 8 个 Linux 包（x86/x64/arm32/arm64 × musl/glibc，Zig 交叉编译），产物目录改名为 `miniddns-<version>-linux-<arch>-<libc>/` 并新增根 `README.md`；tar.gz 内为可直接复制到 `/opt` 或 `/usr/local` 的自包含目录结构，**安装脚本/配置示例/服务器配置示例只存在于 tar.gz 内**，Release 只上传 tar.gz 与聚合 `SHA256SUMS`。无运行时行为变更 |
 | 1.2.2 | 打包/发布扩展（§13.3）：明确产物清单必须包含二进制、配置示例、安装脚本与服务器配置示例，新增 `conf/README.md`、`examples/` 与产物清单校验门禁；新增发布流程规范 `docs/RELEASE_PROCESS.md`、CI 与 release workflow、`VERSION` 编译期注入。无运行时行为变更 |
 | 1.2.1 | 实现回写（§04.7）：按 BearSSL 0.6 实际 API 修正 §08.1 调用顺序/信任锚/时间换算（`days` 自 0000-01-01，偏移 `719528`）、§09.1/§09.2 DN 来源（`append_dn` 回调，DER 字节串）、附录 A.5 API 清单；无功能语义变更 |
 | 1.2 | 依 `docs/review-design-v1.1.md` 全量修订 40 项（P0×10 / P1×18 / P2×12）：删除 `[record].record_id`（与零写入不变量互斥）、新增 `[core].write_memo_ms`、修正 `ipv6_mode` 默认值、`lock_file` 含实例名、日志改为 `<PRI>` 数字前缀、合并 `E_HTTP_4XX`→`E_HTTP_STATUS`、必须实现 chunked 解码、`LoadCredential` 改为可选、符号链接策略分级、netlink 订阅补 `RTNLGRP_LINK`、接口名改 `if_indextoname`、强制 `IFF_UP` 过滤、`SO_RCVBUF` 读回校验、补全保留前缀表、补齐 `struct mn_provider`/`mn_cfg`/常量定义、补 BearSSL DN 原始编码与两段式 arena、`--once` 取 flock、Makefile 可编译化 + `verify-units`/`ca-refresh`/`dist` 断言、dist 增 `LICENSES/`、补 8 类测试用例、新增 §04.7 兼容策略与阅读路径 |
