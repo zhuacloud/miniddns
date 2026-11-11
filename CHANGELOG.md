@@ -25,10 +25,13 @@
 
 ### Fixed
 
+- fix(ci): keep release tarballs outside the build directory (bacf8b8)
 - fix(ci): expose kernel UAPI headers for musl static builds (8c207e0)
 
 ### Internal
 
+- build: package eight Linux variants as self-contained tarballs (34521be)
+- chore(release): update changelog for 0.0.1-rc1 (a73b90e)
 - ci: add automated release pipeline and enforce the release artifact manifest (4ded7c5)
 
 
