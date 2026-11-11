@@ -1,7 +1,9 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=miniddns
-PKG_VERSION:=1.2.0
+# OpenWrt package versions must be numeric; release builds override this via
+# the SDK. Local/dev builds use 0.0.0 (the binary itself reports 0.0.0-dev).
+PKG_VERSION?=0.0.0
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE

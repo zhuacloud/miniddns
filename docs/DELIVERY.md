@@ -1,6 +1,8 @@
-# miniddns 实现与验收报告（v1.2.0）
+# miniddns 实现与验收报告（设计规格 v1.2 / 软件发布 0.0.1-rc1）
 
-> 依据：`docs/design.md` v1.2（+ 1.2.1 实现回写）· 状态：**已实现并通过全部可执行的验收门禁**
+> 依据：`docs/design.md` v1.2（+ 1.2.x 实现回写）· 状态：**已实现并通过全部可执行的验收门禁**
+>
+> 注意：`v1.2` 是**设计规格版本**，`0.0.1-rc1` 是**软件发布版本**，两者不是同一个编号体系；本地 `make` 默认构建报告 `0.0.0-dev`。
 
 ## 1. 交付范围
 
@@ -61,7 +63,7 @@
 
 - 源码：`src/*.c` / `src/*.h`；vendor：`third_party/`。
 - 打包资产：`conf/miniddns.conf.example`、`systemd/`、`openwrt/`、`install.sh`、`ca/`（`make ca-refresh` 生成）、`doc/`（`make doc` 生成）。
-- 发布产物：`dist/miniddns-1.2.0-x86_64-musl/`（含 `bin/`、`conf/`、`ca/`、`systemd/`、`openwrt/`、`doc/`、`LICENSES/`、`install.sh`、`SHA256SUMS`、`THIRD_PARTY_NOTICES.md`）。
+- 发布产物：8 个 `dist/miniddns-<version>-linux-<arch>-<libc>/` 自包含目录（x86/x64/arm32/arm64 × musl/glibc），各自打成 tar.gz；内含 `README.md`、`bin/`、`conf/`、`examples/`、`install.sh`、`systemd/`、`openwrt/`、`ca/`、`doc/`、`LICENSES/`、`SHA256SUMS`、`THIRD_PARTY_NOTICES.md`。见 `docs/RELEASE_PROCESS.md`。
 
 ## 5. 已知限制 / 未执行的验收
 

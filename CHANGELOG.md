@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Version namespaces clarified: `docs/design.md` v1.2 is the design specification version, not a software release. Local `make` now reports `0.0.0-dev`; only the release workflow injects `VERSION=X.Y.Z`. Earlier references to "1.2.0" as a software version were a mistake (the historical commit subject below is kept verbatim).
+
 ### Added
 
 - Automated release pipeline: tag creation, CI/CD build, generated changelog and GitHub Release publishing, for stable (`X.Y.Z`) and release-candidate (`X.Y.Z-rcN`) versions. See `docs/RELEASE_PROCESS.md`.
@@ -35,7 +39,7 @@
 - ci: add automated release pipeline and enforce the release artifact manifest (4ded7c5)
 
 
-## [1.2.0] — 2026-11
+## [Implementation baseline] — 2026-11（对应设计规格 v1.2，非软件版本号）
 
 ### 代码（首次实现，M0–M5 全部完成）
 

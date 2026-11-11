@@ -2,6 +2,7 @@
 """§14.6 spec self-check: defaults ∈ enums, cross refs, defined symbols, install paths."""
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -144,6 +145,23 @@ for token in ("TARGET_ARCH", "LIBC", "ZIG_TARGET", "ARTIFACT_ID"):
     if token not in makefile:
         problems.append("Makefile must support multi-platform packaging (%s)" % token)
 notes.append("release pipeline OK")
+
+# 7. version namespaces: the spec version is not a software version ---------
+if "VERSION  ?= 0.0.0-dev" not in makefile:
+    problems.append("local default build must be 0.0.0-dev, not the spec version")
+header = read(os.path.join(ROOT, "src", "miniddns.h"))
+if '#define MN_VERSION        "0.0.0-dev"' not in header:
+    problems.append("src/miniddns.h fallback must be 0.0.0-dev")
+try:
+    dev_check = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "scripts", "gen_changelog.py"),
+         "--validate-only", "--version", "0.0.0-dev"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if dev_check.returncode == 0:
+        problems.append("the development version must not be accepted for release")
+except OSError:
+    pass
+notes.append("version namespaces OK")
 
 print("spec-check: %d notes" % len(notes))
 for n in notes[:8]:

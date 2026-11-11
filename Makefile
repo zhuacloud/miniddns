@@ -4,7 +4,13 @@ CSTD     ?= -std=c99
 WARN     ?= -Wall -Wextra -Wno-unused-parameter
 HARDEN   ?= -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -fno-plt
 OPT      ?= -O2
-VERSION  ?= 1.2.0
+# Three DIFFERENT version namespaces (see docs/RELEASE_PROCESS.md section 1):
+#   - design specification version: docs/design.md v1.2 + revisions 1.2.x
+#   - software release version: X.Y.Z / X.Y.Z-rcN, injected by the release workflow
+#   - local development build: 0.0.0-dev (default when VERSION is not given)
+# Never use the design spec version as a software version.
+VERSION  ?= 0.0.0-dev
+DEV_VERSION := 0.0.0-dev
 REPO     ?= zhuacloud/miniddns
 # Release artifact identity: linux + arch (x86/x64/arm32/arm64) + libc (musl/glibc).
 TARGET_ARCH ?= x64
@@ -56,7 +62,11 @@ version:
 	@echo $(VERSION)
 
 version-check:
-	@python3 scripts/gen_changelog.py --validate-only --version "$(VERSION)"
+	@if [ "$(VERSION)" = "$(DEV_VERSION)" ]; then \
+	  echo "OK: $(VERSION) is a local development build (not releasable). Pass VERSION=X.Y.Z to release."; \
+	 else \
+	  python3 scripts/gen_changelog.py --validate-only --version "$(VERSION)"; \
+	 fi
 
 changelog:
 	@python3 scripts/gen_changelog.py --version "$(VERSION)" --repo "$(REPO)" \

@@ -8,6 +8,20 @@ original language.
 
 ## 1. Version scheme
 
+### Three separate version namespaces
+
+| Namespace | Example | Meaning |
+| --- | --- | --- |
+| Design specification | `docs/design.md` v1.2, revisions 1.2.1–1.2.4 | Version of the specification document. **Not** a software version. |
+| Software release | `0.0.1`, `0.0.1-rc1` | SemVer of the shipped binary, injected by the release workflow via `VERSION=`. |
+| Local development build | `0.0.0-dev` | Default when `VERSION` is not given. Never releasable; `--version` reports it so a dev binary can never be confused with a release. |
+
+The specification version must never be used as a software version. A plain
+`make` (or `make test`) produces `0.0.0-dev`; only
+`make dist VERSION=X.Y.Z ...` and the Release workflow inject a real version.
+`make version` prints the effective value and `make version-check` reports
+that the development build is not releasable.
+
 A release version is a SemVer string with an optional release-candidate
 suffix:
 

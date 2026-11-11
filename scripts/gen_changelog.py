@@ -14,6 +14,7 @@ import sys
 
 MARKER = "<!-- generated-release-sections -->"
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-rc[1-9]\d*)?$")
+DEV_VERSION = "0.0.0-dev"  # local build, never releasable
 
 GROUPS = [
     ("Added", ("feat",)),
@@ -186,6 +187,11 @@ def main():
     args = ap.parse_args()
 
     version = args.version.strip()
+    if version == DEV_VERSION:
+        print("ERROR: %s is the local development build and cannot be released. "
+              "Pass an explicit VERSION=X.Y.Z or VERSION=X.Y.Z-rcN." % DEV_VERSION,
+              file=sys.stderr)
+        return 3
     if not is_valid_version(version):
         print("ERROR: invalid version %r; expected X.Y.Z or X.Y.Z-rcN" % version, file=sys.stderr)
         return 2

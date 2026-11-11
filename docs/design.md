@@ -1020,7 +1020,7 @@ read bundle (≤2 MiB, 整文件读入)        # 路径已按 §03 校验（允�
 
 | 时机 | 示例 |
 | --- | --- |
-| 启动 | `<6>miniddns: start version=1.2.0 instance=home config=/etc/miniddns/miniddns.conf level=info` |
+| 启动 | `<6>miniddns: start version=0.0.1 instance=home config=/etc/miniddns/miniddns.conf level=info` |
 | CA | `<6>miniddns: ca loaded anchors=141 path=/opt/miniddns/ca/ca-certificates.crt earliest_notAfter=2027-04-15 source=bundled level=info` |
 | netlink | `<6>miniddns: netlink subscribed groups=link,ipv4_ifaddr,ipv6_ifaddr rcvbuf_actual=425984 initial_addrs=3 level=info` |
 | 事件 | `<7>miniddns: addr event family=inet6 action=add iface=eth0 addr=2402:... level=debug` |
@@ -1299,7 +1299,7 @@ journalctl -u miniddns -g 'level=warn'
 systemctl show -p CPUUsageNSec -p MemoryPeak miniddns   # 资源验收（§14.5）
 
 # 升级/回滚（方案 A）：
-sudo ln -sfn /opt/miniddns-1.2.0 /opt/miniddns && sudo systemctl restart miniddns
+sudo ln -sfn /opt/miniddns-0.0.1 /opt/miniddns && sudo systemctl restart miniddns
 ```
 
 <a name="s13" id="s13"></a>
@@ -1319,7 +1319,9 @@ INC      = -Ithird_party/bearssl/inc -Ithird_party/jsmn -Isrc
 CFLAGS  += $(CSTD) $(WARN) $(HARDEN) $(OPT) $(DEFS) $(INC)   # ★ 必须汇总到 CFLAGS
 LDFLAGS += -pie -Wl,-z,relro,-z,now
 
-VERSION  ?= 1.2.0
+# 版本命名空间必须分开（见 docs/RELEASE_PROCESS.md §1）：本文件是设计规格 v1.2；
+# 软件发布版本由 release workflow 注入 X.Y.Z / X.Y.Z-rcN；本地默认构建为开发版。
+VERSION  ?= 0.0.0-dev
 ARCH     ?= $(shell uname -m)
 
 BEARSSL_SRC := $(shell find third_party/bearssl/src -name '*.c')
@@ -1811,6 +1813,7 @@ root 模式（默认）：
 
 | 版本 | 变更 |
 | --- | --- |
+| 1.2.4 | 版本命名空间澄清（§13.1 / §10.2 / §12.7）：设计规格版本（v1.2）不等于软件版本；本地 `make` 默认构建版本改为 `0.0.0-dev`，发布版本由 release workflow 以 `VERSION=X.Y.Z` 注入；清理正文里把 `1.2.0` 当作软件版本的示例。无功能变更 |
 | 1.2.3 | 打包格式修正（§03 / §13.3）：每个版本发布 8 个 Linux 包（x86/x64/arm32/arm64 × musl/glibc，Zig 交叉编译），产物目录改名为 `miniddns-<version>-linux-<arch>-<libc>/` 并新增根 `README.md`；tar.gz 内为可直接复制到 `/opt` 或 `/usr/local` 的自包含目录结构，**安装脚本/配置示例/服务器配置示例只存在于 tar.gz 内**，Release 只上传 tar.gz 与聚合 `SHA256SUMS`。无运行时行为变更 |
 | 1.2.2 | 打包/发布扩展（§13.3）：明确产物清单必须包含二进制、配置示例、安装脚本与服务器配置示例，新增 `conf/README.md`、`examples/` 与产物清单校验门禁；新增发布流程规范 `docs/RELEASE_PROCESS.md`、CI 与 release workflow、`VERSION` 编译期注入。无运行时行为变更 |
 | 1.2.1 | 实现回写（§04.7）：按 BearSSL 0.6 实际 API 修正 §08.1 调用顺序/信任锚/时间换算（`days` 自 0000-01-01，偏移 `719528`）、§09.1/§09.2 DN 来源（`append_dn` 回调，DER 字节串）、附录 A.5 API 清单；无功能语义变更 |

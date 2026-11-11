@@ -82,6 +82,9 @@ verifies both native libc artifact layouts without publishing anything.
   disagrees with the spec, update the spec (§04.7) and add a revision entry.
 - Use Conventional Commit subjects (`feat:`, `fix:`, `docs:`, …) so the
   generated changelog groups them correctly.
+- Do not confuse the design specification version (`docs/design.md` v1.2) with
+  software release versions. Local builds report `0.0.0-dev`; only the release
+  workflow injects `VERSION=X.Y.Z`. See `docs/RELEASE_PROCESS.md` section 1.
 - Run `make test`, `make test-asan`, `make spec-check` and `make dist` before
   opening a pull request.
 - Keep the zero-write invariant intact: no write request when the IP is

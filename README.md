@@ -3,12 +3,19 @@
 A multi-provider dynamic DNS daemon with an extremely small footprint.
 C99 + netlink + BearSSL; static binary ≤ 500 KB, resident RSS ≤ 2.5 MB.
 
-> **Status: implemented (v1.2.0).** Unit, integration, ASan/UBSan and packaging
+> **Status: implemented.** Unit, integration, ASan/UBSan and packaging
 > gates all pass.
 > The implementation follows [`docs/design.md`](docs/design.md)
-> (v1.2 + the 1.2.1 BearSSL 0.6 API corrections). That specification is the
+> (design specification v1.2 + revisions 1.2.x). That specification is the
 > single source of truth; when implementation and specification disagree, the
 > actual behaviour is written back into the spec (§04.7).
+
+> **Version namespaces** (see [`docs/RELEASE_PROCESS.md`](docs/RELEASE_PROCESS.md)):
+> `docs/design.md` v1.2 is the **design specification** version, not a software
+> release. Published binaries use SemVer (`0.0.1`, `0.0.1-rc1`). A plain local
+> `make` with no `VERSION` produces a development build that reports
+> **`0.0.0-dev`**; only the release workflow injects a real version. To build
+> with an explicit version locally, use `make VERSION=0.0.1`.
 
 ## What it solves
 

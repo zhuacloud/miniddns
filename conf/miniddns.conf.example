@@ -1,5 +1,5 @@
 # /etc/miniddns/miniddns.conf            -*- mode: ini -*-
-# miniddns 1.2.0 — copy this file to miniddns.conf and edit; NEVER ship a real token.
+# miniddns configuration example — copy to miniddns.conf and edit; NEVER ship a real token.
 [core]
 instance          = home
 interval_fallback = 900
