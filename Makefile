@@ -13,7 +13,15 @@ DEFS     ?= -DBR_USE_URANDOM -D_GNU_SOURCE -D_DEFAULT_SOURCE
 # never through a quoted -D macro: quoted defines lose their quotes when CFLAGS
 # or DEFS is passed to a sub-make. Override with `make dist VERSION=0.0.1-rc1`.
 DEFS     += -DMN_USE_GENERATED_VERSION=1
-INC       = -Ithird_party/bearssl/inc -Ithird_party/bearssl/src -Ithird_party/jsmn -Isrc -Ibuild
+# Debian's musl-gcc uses -nostdinc and therefore hides the kernel UAPI headers
+# (linux/if_addr.h, linux/rtnetlink.h, asm/types.h). Exposing /usr/include
+# directly would mix glibc headers into a musl build, so stage only the UAPI
+# trees in build/uapi and add that directory to the include path.
+MACHINE  := $(shell $(CC) -dumpmachine 2>/dev/null || echo x86_64-linux-gnu)
+UAPI_DIR  = build/uapi
+KERNEL_ASM = /usr/include/$(MACHINE)/asm
+UAPI_STAMP = $(UAPI_DIR)/.stamp
+INC       = -Ithird_party/bearssl/inc -Ithird_party/bearssl/src -Ithird_party/jsmn -Isrc -Ibuild -isystem $(UAPI_DIR)
 SECTS     = -ffunction-sections -fdata-sections
 CFLAGS   += $(CSTD) $(WARN) $(HARDEN) $(OPT) $(DEFS) $(INC) $(SECTS)
 # BearSSL is upstream code; keep our own -Wall -Wextra clean while not failing on it.
@@ -73,7 +81,15 @@ build/version.h: FORCE
 	@printf '#ifndef MN_GENERATED_VERSION_H\n#define MN_GENERATED_VERSION_H\n#define MN_VERSION "%s"\n#endif\n' "$(VERSION)" > $@.tmp
 	@if ! cmp -s $@.tmp $@ 2>/dev/null; then mv $@.tmp $@; else rm -f $@.tmp; fi
 
-$(APP_OBJ): build/version.h
+$(UAPI_STAMP):
+	@mkdir -p $(UAPI_DIR)
+	@rm -rf $(UAPI_DIR)/linux $(UAPI_DIR)/asm $(UAPI_DIR)/asm-generic
+	@if [ -d /usr/include/linux ]; then ln -sfn /usr/include/linux $(UAPI_DIR)/linux; fi
+	@if [ -d /usr/include/asm-generic ]; then ln -sfn /usr/include/asm-generic $(UAPI_DIR)/asm-generic; fi
+	@if [ -d "$(KERNEL_ASM)" ]; then ln -sfn "$(KERNEL_ASM)" $(UAPI_DIR)/asm; fi
+	@touch $@
+
+$(APP_OBJ): build/version.h $(UAPI_STAMP)
 
 # Static artifact (musl/embedded): -no-pie, stripped. Rebuild objects: make does
 # not track flag changes, and -fPIE objects must not leak into a -no-pie link.

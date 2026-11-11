@@ -142,6 +142,9 @@ leave the operator's machine.
 On every push/PR to `main` (and on manual dispatch), CI:
 
 - installs `musl-tools`;
+- the Makefile stages the kernel UAPI headers in `build/uapi` because
+  Debian's `musl-gcc` uses `-nostdinc` (otherwise `linux/if_addr.h` and
+  `linux/rtnetlink.h` are not visible during the static build);
 - builds with `make -j"$(nproc)"`;
 - runs `make spec-check`, `make verify-units`, `make test` and
   `make test-asan`;
