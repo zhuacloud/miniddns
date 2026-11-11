@@ -9,7 +9,7 @@ Every piece of content created on or sent to GitHub **MUST** be written in
 English. This includes, but is not limited to:
 
 - commit messages (subject and body),
-- branch and tag names,
+- branch, tag and release names (tags are exactly `X.Y.Z` or `X.Y.Z-rcN`),
 - pull request titles and descriptions,
 - issues and issue comments,
 - code review comments and suggestions,
@@ -56,11 +56,29 @@ The check verifies that `README.md` contains no CJK characters, that this
 file exists, and that it states the English-only GitHub rule. CI should run
 `make spec-check` together with `make verify-units` and `make test`.
 
+## Release workflow
+
+Releases are produced by `.github/workflows/release.yml` (`workflow_dispatch`)
+and are fully documented in `docs/RELEASE_PROCESS.md`. That document defines:
+
+- the version scheme (`X.Y.Z` stable, `X.Y.Z-rcN` release candidate),
+- the tag → build → changelog → publish pipeline,
+- the **release artifact manifest**: every release must bundle the runnable
+  static binary, the configuration example, the install script and the server
+  configuration examples (systemd and OpenWrt), enforced by
+  `scripts/verify_release_artifacts.py`,
+- the English-only rule for generated changelogs, release notes and tags.
+
+`.github/workflows/ci.yml` builds and tests every push/PR to `main` and
+verifies the artifact layout without publishing anything.
+
 ## Technical contributions
 
 - Read `docs/design.md` before changing behaviour; when the implementation
   disagrees with the spec, update the spec (§04.7) and add a revision entry.
-- Run `make test`, `make test-asan` and `make dist` before opening a pull
-  request.
+- Use Conventional Commit subjects (`feat:`, `fix:`, `docs:`, …) so the
+  generated changelog groups them correctly.
+- Run `make test`, `make test-asan`, `make spec-check` and `make dist` before
+  opening a pull request.
 - Keep the zero-write invariant intact: no write request when the IP is
   unchanged.

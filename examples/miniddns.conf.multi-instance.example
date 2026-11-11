@@ -1,0 +1,51 @@
+# Multi-instance example. Save each [core] block as its own config file:
+#   /etc/miniddns/home.conf  -> instance=home  -> /run/miniddns/home.lock
+#   /etc/miniddns/office.conf -> instance=office -> /run/miniddns/office.lock
+#
+# Start one unit per instance with an explicit --config, e.g.:
+#   ExecStart=/opt/miniddns/bin/miniddns --foreground --config /etc/miniddns/home.conf
+# The stock miniddns.service is NOT parameterised (see docs/design.md §16).
+#
+# Instance 1 ---------------------------------------------------------------
+[core]
+instance          = home
+interval_fallback = 900
+lock_file         = /run/miniddns/home.lock
+log_level         = info
+
+[detect]
+ipv4_mode = iface
+ipv6_mode = iface
+iface_include = eth0
+
+[provider]
+id         = cf-home
+kind       = cloudflare
+zone_id    = 023e105f4ecef8ad9ca31a8372d0c353
+token_file = /etc/miniddns/home.token
+
+[record]
+provider = cf-home
+name     = home.example.com
+type     = A
+ttl      = 60
+proxied  = false
+
+# Instance 2 — put this part in /etc/miniddns/office.conf instead ----------
+# [core]
+# instance          = office
+# interval_fallback = 900
+# lock_file         = /run/miniddns/office.lock
+# [detect]
+# ipv4_mode = external
+# ipv6_mode = off
+# [provider]
+# id         = cf-office
+# kind       = cloudflare
+# zone_id    = 023e105f4ecef8ad9ca31a8372d0c353
+# token_file = /etc/miniddns/office.token
+# [record]
+# provider = cf-office
+# name     = office.example.com
+# type     = A
+# ttl      = 60

@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release: X.Y.Z (stable) or X.Y.Z-rcN (release candidate)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Validate and build without tagging, committing or publishing'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Tag, build, changelog and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ inputs.version }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Validate version input
+        id: validate
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Releases must be triggered from the main branch."
+            exit 1
+          fi
+          python3 scripts/gen_changelog.py --validate-only --version "${VERSION}"
+          if [[ "${VERSION}" == *-rc* ]]; then
+            echo "prerelease=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "prerelease=false" >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ "${DRY_RUN}" == "false" ]]; then
+            if git ls-remote --exit-code origin "refs/tags/${VERSION}" >/dev/null 2>&1; then
+              echo "::error::Tag ${VERSION} already exists. Choose a new version or delete the tag deliberately."
+              exit 1
+            fi
+          fi
+          prerelease="$(grep '^prerelease=' "${GITHUB_OUTPUT}" | cut -d= -f2)"
+          echo "Validated version ${VERSION} (prerelease=${prerelease})"
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create and push tag
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          set -euo pipefail
+          git tag -a "${VERSION}" -m "Release ${VERSION}" HEAD
+          git push origin "refs/tags/${VERSION}"
+          echo "Created tag ${VERSION}"
+
+      - name: Build, test and package
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)"
+          make spec-check
+          make verify-units
+          make test
+          make test-asan
+          make dist VERSION="${VERSION}"
+
+      - name: Generate changelog and release notes
+        run: |
+          set -euo pipefail
+          python3 scripts/gen_changelog.py \
+            --version "${VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --changelog CHANGELOG.md \
+            --notes build/RELEASE_NOTES.md
+          if [[ "${DRY_RUN}" == "false" ]]; then
+            if ! git diff --quiet -- CHANGELOG.md; then
+              git add CHANGELOG.md
+              git commit -m "chore(release): update changelog for ${VERSION}"
+              git push origin HEAD:main
+            fi
+          fi
+
+      - name: Create release assets
+        run: |
+          set -euo pipefail
+          ARCH="$(uname -m)"
+          D="miniddns-${VERSION}-${ARCH}-musl"
+          mkdir -p build/release-assets
+          tar -czf "build/release-assets/${D}.tar.gz" -C dist "${D}"
+          (cd build/release-assets && sha256sum "${D}.tar.gz" > "${D}.tar.gz.sha256")
+          cp "dist/${D}/SHA256SUMS"       build/release-assets/SHA256SUMS
+          cp "dist/${D}/install.sh"       build/release-assets/install.sh
+          cp "dist/${D}/conf/miniddns.conf.example" build/release-assets/miniddns.conf.example
+          cp "dist/${D}/systemd/miniddns.service"   build/release-assets/miniddns.service
+          cp build/RELEASE_NOTES.md      build/release-assets/RELEASE_NOTES.md
+          echo "Assets for ${D}:"
+          ls -1 build/release-assets
+
+      - name: Publish GitHub release
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          set -euo pipefail
+          args=(--verify-tag --title "miniddns ${VERSION}" --notes-file build/RELEASE_NOTES.md)
+          # Stable releases become "latest" automatically; only RC needs a flag.
+          if [[ "${{ steps.validate.outputs.prerelease }}" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${VERSION}" "${args[@]}" \
+            build/release-assets/*.tar.gz \
+            build/release-assets/*.tar.gz.sha256 \
+            build/release-assets/SHA256SUMS \
+            build/release-assets/RELEASE_NOTES.md \
+            build/release-assets/install.sh \
+            build/release-assets/miniddns.conf.example \
+            build/release-assets/miniddns.service
+          echo "Published release ${VERSION}"
+
+      - name: Dry-run summary
+        if: ${{ inputs.dry_run == true }}
+        run: |
+          {
+            echo "## Dry run for ${VERSION}"
+            echo ""
+            echo "No tag, commit or GitHub release was created."
+            echo ""
+            cat build/RELEASE_NOTES.md
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Release summary
+        if: ${{ inputs.dry_run == false }}
+        run: |
+          {
+            echo "## Released ${VERSION}"
+            echo ""
+            echo "- Tag: \`${VERSION}\`"
+            echo "- Prerelease: ${{ steps.validate.outputs.prerelease }}"
+            echo "- Artifacts: tarball, SHA256SUMS, install.sh, config example, systemd unit, release notes"
+          } >> "${GITHUB_STEP_SUMMARY}"

@@ -6,6 +6,15 @@
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- Automated release pipeline: tag creation, CI/CD build, generated changelog and GitHub Release publishing, for stable (`X.Y.Z`) and release-candidate (`X.Y.Z-rcN`) versions. See `docs/RELEASE_PROCESS.md`.
+- Release artifacts now explicitly bundle the static binary, configuration examples, the install script and systemd/OpenWrt service configuration examples; the manifest is verified by `scripts/verify_release_artifacts.py`.
+
+<!-- generated-release-sections -->
+
 ## [1.2.0] — 2026-11
 
 ### 代码（首次实现，M0–M5 全部完成）

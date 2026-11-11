@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Build
+        run: make -j"$(nproc)"
+
+      - name: Specification and unit-file checks
+        run: |
+          make spec-check
+          make verify-units
+
+      - name: Unit and integration tests
+        run: make test
+
+      - name: Sanitizer build and tests
+        run: make test-asan
+
+      - name: Verify the release artifact layout
+        run: make dist VERSION=0.0.0-rc${{ github.run_number }}
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: miniddns-ci-${{ github.run_number }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7

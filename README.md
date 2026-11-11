@@ -50,6 +50,7 @@ miniddns instead:
 | Verify the original wording | [`docs/archive/design-v1.1.html`](docs/archive/design-v1.1.html) (read-only snapshot) |
 | Changelog | [`CHANGELOG.md`](CHANGELOG.md) |
 | Implementation and acceptance report | [`docs/DELIVERY.md`](docs/DELIVERY.md) |
+| Packaging and release process | [`docs/RELEASE_PROCESS.md`](docs/RELEASE_PROCESS.md) |
 | Repository rules (language, contributions) | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Third-party licenses | [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) |
 
@@ -63,6 +64,8 @@ make test-asan       # unit tests under ASan/UBSan
 make spec-check      # specification consistency (defaults / cross refs / symbols / install paths)
 make verify-units    # systemd template vs. generated unit
 make dist            # dist/miniddns-$(VERSION)-$(ARCH)-musl/
+make dist VERSION=0.0.1          # stable release build
+make dist VERSION=0.0.1-rc1      # release-candidate build
 ```
 
 ```bash
@@ -88,11 +91,29 @@ No periodic polling loop, no Web UI, no multithreading, no state file, no
 MX/TXT/CAA management, no HTTP proxy support, no TLS 1.3. The complete list
 is in §01 "Non-goals".
 
+## Releasing
+
+Releases are driven by the **Release** GitHub Actions workflow
+(`workflow_dispatch`): enter a version such as `0.0.1` (stable) or
+`0.0.1-rc1` (release candidate) and it creates the annotated tag, runs the
+full build/tests, generates an English changelog and publishes the GitHub
+Release. `dry_run=true` previews everything without tagging or publishing.
+See [`docs/RELEASE_PROCESS.md`](docs/RELEASE_PROCESS.md).
+
+The release tarball always contains the static binary, the configuration
+example, the install script and the server configuration examples (systemd
+unit/template/drop-in and OpenWrt procd), plus the CA snapshot, documentation,
+license notices and `SHA256SUMS`. The manifest is verified automatically by
+`scripts/verify_release_artifacts.py`.
+
+Push and pull requests to `main` are built and tested by the **CI** workflow,
+which also verifies that the artifact tree can be produced.
+
 ## Contributing / repository rules
 
 **All interactions with GitHub must be in English** (commit messages, branch
-names, pull requests, issues, comments, reviews, release notes), and
-**this README must be written in English**. See
+names, pull requests, issues, comments, reviews, release notes, tags and
+workflow text), and **this README must be written in English**. See
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full rule and its scope.
 
 ## License

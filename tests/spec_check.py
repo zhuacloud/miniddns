@@ -102,6 +102,36 @@ else:
         problems.append("CONTRIBUTING.md must state that README.md is English")
 notes.append("language policy OK")
 
+# 6. release automation and artifact manifest (docs/RELEASE_PROCESS.md) -----
+release_assets = [
+    "docs/RELEASE_PROCESS.md",
+    "scripts/gen_changelog.py",
+    "scripts/verify_release_artifacts.py",
+    ".github/workflows/ci.yml",
+    ".github/workflows/release.yml",
+    "conf/README.md",
+    "examples/README.md",
+    "examples/miniddns.conf.minimal.example",
+    "examples/miniddns.conf.multi-instance.example",
+]
+for rel in release_assets:
+    if not os.path.exists(os.path.join(ROOT, rel)):
+        problems.append("missing release asset: %s" % rel)
+release_yml = os.path.join(ROOT, ".github", "workflows", "release.yml")
+if os.path.exists(release_yml):
+    ry = read(release_yml)
+    if "workflow_dispatch" not in ry:
+        problems.append("release workflow must be triggered by workflow_dispatch")
+    if "make dist VERSION=" not in ry:
+        problems.append("release workflow must build with an explicit VERSION")
+    if "--prerelease" not in ry:
+        problems.append("release workflow must support RC prereleases")
+if "verify_release_artifacts.py" not in makefile:
+    problems.append("Makefile dist must verify the release artifact manifest")
+if "build/version.h" not in makefile or "MN_USE_GENERATED_VERSION" not in makefile:
+    problems.append("Makefile must inject VERSION into the binary via build/version.h")
+notes.append("release pipeline OK")
+
 print("spec-check: %d notes" % len(notes))
 for n in notes[:8]:
     print("  -", n)

@@ -63,6 +63,13 @@ install -Dm0755 "$BIN_SRC" "$BINDIR/miniddns"
 if [ -f "$ROOT/conf/miniddns.conf.example" ]; then
     install -Dm0644 "$ROOT/conf/miniddns.conf.example" "$PREFIX/conf/miniddns.conf.example"
 fi
+if [ -f "$ROOT/conf/README.md" ]; then
+    install -Dm0644 "$ROOT/conf/README.md" "$PREFIX/conf/README.md"
+fi
+if [ -d "$ROOT/examples" ]; then
+    mkdir -p "$PREFIX/examples"
+    cp -R "$ROOT/examples/." "$PREFIX/examples/"
+fi
 # 2. NEVER create or overwrite a token file.
 if [ -f "$ROOT/ca/ca-certificates.crt" ]; then
     install -Dm0644 "$ROOT/ca/ca-certificates.crt" "$PREFIX/ca/ca-certificates.crt"
@@ -109,6 +116,7 @@ echo ""
 echo "installed:"
 echo "  binary  : $BINDIR/miniddns"
 echo "  config  : $PREFIX/conf/miniddns.conf.example (copy to $SYSCONFDIR/miniddns.conf)"
+echo "  examples: $PREFIX/examples/ (config and service configuration examples)"
 echo "  ca      : $PREFIX/ca/ca-certificates.crt"
 echo "  docs    : $DOCDIR/design.md"
 echo "  unit    : $SYSTEMD_DIR/miniddns.service"

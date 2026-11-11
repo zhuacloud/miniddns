@@ -186,7 +186,8 @@ flowchart TD
 ```
 miniddns-$(VERSION)-x86_64-musl/       # 完整清单以 §13.3 为准（单一事实源）
 ├── bin/miniddns                     # 静态二进制，ldd => not a dynamic executable
-├── conf/miniddns.conf.example       # 模板；*注意* 不叫 miniddns.conf（见下）
+├── conf/{miniddns.conf.example,README.md}   # 配置示例与说明；*注意* 不叫 miniddns.conf
+├── examples/                        # 额外配置/服务器配置示例
 ├── ca/ca-certificates.crt           # 全量 CA 快照（兜底）
 ├── ca/README                        # 快照日期 + sha256 + 来源说明
 ├── systemd/{miniddns.service,miniddns.service.in,miniddns.service.d/}
@@ -1462,17 +1463,24 @@ clean:
 
 ```
 dist/miniddns-$(VERSION)-$(ARCH)-musl/
-├── bin/miniddns
-├── conf/miniddns.conf.example     # 由 conf/miniddns.conf.example 复制（不是 .conf）
-├── ca/ca-certificates.crt         # 从构建机 $(CA_SRC) 复制
-├── ca/README                      # 快照 UTC 日期 + sha256 + 来源发行版 + 证书数
-├── systemd/
+├── bin/miniddns                   # 静态二进制，可直接运行（发布产物核心）
+├── conf/
+│   ├── miniddns.conf.example     # 配置示例（不是 .conf）
+│   └── README.md                 # 安装/权限说明
+├── examples/                     # 额外配置示例
+│   ├── README.md
+│   ├── miniddns.conf.minimal.example
+│   └── miniddns.conf.multi-instance.example
+├── install.sh                    # 幂等安装脚本
+├── systemd/                      # 服务器配置示例（systemd）
 │   ├── miniddns.service           # 已按默认 PREFIX=/opt/miniddns 生成，可直接 cp
 │   ├── miniddns.service.in        # 模板，供自定义 PREFIX
 │   └── miniddns.service.d/user-nonroot.conf   # 非 root drop-in
-├── openwrt/
+├── openwrt/                      # 服务器配置示例（procd）
 │   ├── Makefile                   # DEPENDS:=+ca-bundle
-│   └── files/miniddns.init        # procd（OpenWrt）
+│   └── files/miniddns.init
+├── ca/ca-certificates.crt         # 从构建机 $(CA_SRC) 复制
+├── ca/README                      # 快照 UTC 日期 + sha256 + 来源发行版 + 证书数
 ├── LICENSES/                      # ★ MIT 归属要求，不可缺
 │   ├── miniddns-MIT.txt
 │   ├── THIRD_PARTY_NOTICES.md
@@ -1480,19 +1488,20 @@ dist/miniddns-$(VERSION)-$(ARCH)-musl/
 │   └── jsmn-MIT.txt
 ├── doc/design.md                 # 权威文档
 ├── doc/design.html               # make doc 生成（可选）
-├── install.sh
-└── SHA256SUMS
+├── THIRD_PARTY_NOTICES.md
+└── SHA256SUMS                    # 全树校验和
 ```
 
 `make dist` 的完整步骤（已写在 §13.1 的 Makefile 里，顺序不可颠倒）：
 
 1. `verify-units` → 模板与成品一致
 2. `$(MAKE) static` → `bin/miniddns`
-3. 复制 `systemd/`（含 `.service`/`.service.in`/drop-in 目录）、`openwrt/`、`conf/*.example`、`doc/`、`install.sh`
+3. 复制 `systemd/`（含 `.service`/`.service.in`/drop-in 目录）、`openwrt/`、`conf/*.example` + `conf/README.md`、`examples/`、`doc/`、`install.sh`
 4. `make ca-refresh` → `ca/ca-certificates.crt` + `ca/README`（含 sha256）
 5. 复制 `LICENSES/`（项目与两个 vendor 组件的 MIT 声明）
 6. `sha256sum` 全树 → `SHA256SUMS`
 7. **断言**：不得包含 `conf/miniddns.conf`、`*.token`、`build/`、`.git*`；`LICENSES/` 不得为空
+8. **产物清单门禁**（v1.2.2 新增）：`scripts/verify_release_artifacts.py` 校验「可运行二进制 / 配置示例 / 安装脚本 / 服务器配置示例」等全部必需文件存在、非空、权限正确、二进制为静态且 `--version` 与 `$(VERSION)` 一致、每个文件的 sha256 与 `SHA256SUMS` 一致。发布流程见 `docs/RELEASE_PROCESS.md`。
 
 > **强制 · dist 包内禁止出现的文件**
 >
@@ -1799,6 +1808,7 @@ root 模式（默认）：
 
 | 版本 | 变更 |
 | --- | --- |
+| 1.2.2 | 打包/发布扩展（§13.3）：明确产物清单必须包含二进制、配置示例、安装脚本与服务器配置示例，新增 `conf/README.md`、`examples/` 与产物清单校验门禁；新增发布流程规范 `docs/RELEASE_PROCESS.md`、CI 与 release workflow、`VERSION` 编译期注入。无运行时行为变更 |
 | 1.2.1 | 实现回写（§04.7）：按 BearSSL 0.6 实际 API 修正 §08.1 调用顺序/信任锚/时间换算（`days` 自 0000-01-01，偏移 `719528`）、§09.1/§09.2 DN 来源（`append_dn` 回调，DER 字节串）、附录 A.5 API 清单；无功能语义变更 |
 | 1.2 | 依 `docs/review-design-v1.1.md` 全量修订 40 项（P0×10 / P1×18 / P2×12）：删除 `[record].record_id`（与零写入不变量互斥）、新增 `[core].write_memo_ms`、修正 `ipv6_mode` 默认值、`lock_file` 含实例名、日志改为 `<PRI>` 数字前缀、合并 `E_HTTP_4XX`→`E_HTTP_STATUS`、必须实现 chunked 解码、`LoadCredential` 改为可选、符号链接策略分级、netlink 订阅补 `RTNLGRP_LINK`、接口名改 `if_indextoname`、强制 `IFF_UP` 过滤、`SO_RCVBUF` 读回校验、补全保留前缀表、补齐 `struct mn_provider`/`mn_cfg`/常量定义、补 BearSSL DN 原始编码与两段式 arena、`--once` 取 flock、Makefile 可编译化 + `verify-units`/`ca-refresh`/`dist` 断言、dist 增 `LICENSES/`、补 8 类测试用例、新增 §04.7 兼容策略与阅读路径 |
 | 1.1 | systemd 单元纳入源码与产物分发：新增 `systemd/miniddns.service.in` 模板与成品、`install.sh`、`make install`、OpenWrt procd 脚本、两种安装布局与可迁移性方案；dist 布局新增 `systemd/`、`openwrt/`、`install.sh` 与 `SHA256SUMS` |

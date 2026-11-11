@@ -1,0 +1,25 @@
+# Minimal miniddns configuration (example only — no real token).
+# Copy to /etc/miniddns/miniddns.conf, then set the token file to mode 0600.
+[core]
+instance          = home
+interval_fallback = 900
+debounce_ms       = 1500
+log_level         = info
+
+[detect]
+ipv4_mode     = external
+ipv6_mode     = off
+iface_exclude = lo,docker0,veth*,br-*,virbr*,wg*
+
+[provider]
+id         = cf-main
+kind       = cloudflare
+zone_id    = 023e105f4ecef8ad9ca31a8372d0c353
+token_file = /etc/miniddns/cloudflare.token
+
+[record]
+provider = cf-main
+name     = home.example.com
+type     = A
+ttl      = 60
+proxied  = false

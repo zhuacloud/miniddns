@@ -6,15 +6,20 @@ CSTD     ?= -std=c99
 WARN     ?= -Wall -Wextra -Wno-unused-parameter
 HARDEN   ?= -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -fno-plt
 OPT      ?= -O2
+VERSION  ?= 1.2.0
+REPO     ?= zhuacloud/miniddns
 DEFS     ?= -DBR_USE_URANDOM -D_GNU_SOURCE -D_DEFAULT_SOURCE
-INC       = -Ithird_party/bearssl/inc -Ithird_party/bearssl/src -Ithird_party/jsmn -Isrc
+# The release version is injected through a generated header (build/version.h),
+# never through a quoted -D macro: quoted defines lose their quotes when CFLAGS
+# or DEFS is passed to a sub-make. Override with `make dist VERSION=0.0.1-rc1`.
+DEFS     += -DMN_USE_GENERATED_VERSION=1
+INC       = -Ithird_party/bearssl/inc -Ithird_party/bearssl/src -Ithird_party/jsmn -Isrc -Ibuild
 SECTS     = -ffunction-sections -fdata-sections
 CFLAGS   += $(CSTD) $(WARN) $(HARDEN) $(OPT) $(DEFS) $(INC) $(SECTS)
 # BearSSL is upstream code; keep our own -Wall -Wextra clean while not failing on it.
 CFLAGS_VENDOR += $(CSTD) $(OPT) $(DEFS) $(INC) $(SECTS) -w
 LDFLAGS  += -pie -Wl,-z,relro,-z,now -Wl,--gc-sections
 
-VERSION  ?= 1.2.0
 ARCH     ?= $(shell uname -m)
 
 APP_SRC  := $(wildcard src/*.c)
@@ -24,8 +29,24 @@ BR_OBJ   := $(patsubst third_party/%.c,build/third_party/%.o,$(BR_SRC))
 OBJ      := $(APP_OBJ) $(BR_OBJ)
 DEP      := $(OBJ:.o=.d)
 
+.DEFAULT_GOAL := all
+
 .PHONY: all static doc test test-asan units verify-units ca-refresh install dist \
-        clean spec-check check-config check-ca print-ip
+        clean spec-check check-config check-ca print-ip version version-check \
+        changelog verify-artifacts
+
+version:
+	@echo $(VERSION)
+
+version-check:
+	@python3 scripts/gen_changelog.py --validate-only --version "$(VERSION)"
+
+changelog:
+	@python3 scripts/gen_changelog.py --version "$(VERSION)" --repo "$(REPO)" \
+	        --changelog CHANGELOG.md --notes build/RELEASE_NOTES.md
+
+verify-artifacts:
+	@python3 scripts/verify_release_artifacts.py --dist $(DIST) --version $(VERSION)
 
 all: build/miniddns
 
@@ -41,6 +62,18 @@ build/miniddns: $(OBJ)
 	$(CC) $(OBJ) $(LDFLAGS) -o $@
 
 -include $(DEP)
+
+# Generated version header. FORCE + cmp means the timestamp only changes when
+# VERSION actually changes, so unrelated builds stay incremental.
+.PHONY: FORCE
+FORCE:
+
+build/version.h: FORCE
+	@mkdir -p $(@D)
+	@printf '#ifndef MN_GENERATED_VERSION_H\n#define MN_GENERATED_VERSION_H\n#define MN_VERSION "%s"\n#endif\n' "$(VERSION)" > $@.tmp
+	@if ! cmp -s $@.tmp $@ 2>/dev/null; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(APP_OBJ): build/version.h
 
 # Static artifact (musl/embedded): -no-pie, stripped. Rebuild objects: make does
 # not track flag changes, and -fPIE objects must not leak into a -no-pie link.
@@ -90,6 +123,8 @@ install: build/miniddns build/miniddns.service doc
 	install -Dm0755 build/miniddns             $(DESTDIR)$(BINDIR)/miniddns
 	install -Dm0644 ca/ca-certificates.crt     $(DESTDIR)$(PREFIX)/ca/ca-certificates.crt
 	install -Dm0644 conf/miniddns.conf.example $(DESTDIR)$(PREFIX)/conf/miniddns.conf.example
+	install -Dm0644 conf/README.md             $(DESTDIR)$(PREFIX)/conf/README.md
+	@mkdir -p $(DESTDIR)$(PREFIX)/examples && cp -r examples/. $(DESTDIR)$(PREFIX)/examples/
 	install -Dm0644 doc/design.md              $(DESTDIR)$(DOCDIR)/design.md
 	@[ -f doc/design.html ] && install -Dm0644 doc/design.html $(DESTDIR)$(DOCDIR)/design.html || true
 	install -Dm0644 THIRD_PARTY_NOTICES.md     $(DESTDIR)$(PREFIX)/THIRD_PARTY_NOTICES.md
@@ -134,6 +169,8 @@ dist: verify-units doc
 	$(MAKE) ca-refresh
 	install -Dm0755 build/miniddns $(DIST)/bin/miniddns
 	install -Dm0644 conf/miniddns.conf.example $(DIST)/conf/miniddns.conf.example
+	install -Dm0644 conf/README.md             $(DIST)/conf/README.md
+	cp -r examples $(DIST)/examples
 	install -Dm0644 ca/ca-certificates.crt  $(DIST)/ca/ca-certificates.crt
 	install -Dm0644 ca/README               $(DIST)/ca/README
 	cp -r systemd $(DIST)/systemd
@@ -151,6 +188,7 @@ dist: verify-units doc
 	  || (echo "FATAL: artifact contains forbidden files"; exit 1)
 	@test -s $(DIST)/LICENSES/bearssl-MIT.txt && test -s $(DIST)/LICENSES/jsmn-MIT.txt \
 	  || (echo "FATAL: missing third-party license notices"; exit 1)
+	@python3 scripts/verify_release_artifacts.py --dist $(DIST) --version $(VERSION)
 	@echo "dist ok: $(DIST)"
 
 clean:
