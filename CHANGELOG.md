@@ -15,6 +15,21 @@
 
 <!-- generated-release-sections -->
 
+## [0.0.1-rc1] - 2026-11-11
+
+### Added
+
+- feat: implement miniddns v1.2.0, an event-driven DDNS daemon (7185655)
+
+### Fixed
+
+- fix(ci): expose kernel UAPI headers for musl static builds (8c207e0)
+
+### Internal
+
+- ci: add automated release pipeline and enforce the release artifact manifest (4ded7c5)
+
+
 ## [1.2.0] — 2026-11
 
 ### 代码（首次实现，M0–M5 全部完成）
