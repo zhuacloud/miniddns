@@ -3,6 +3,7 @@
 /dist/
 /tests/build/
 /doc/
+/release-assets/
 *.o
 *.a
 # NOTE: do NOT add a bare `*.d` rule — it would also match the required

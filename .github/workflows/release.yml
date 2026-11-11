@@ -90,7 +90,7 @@ jobs:
           make verify-units
           make test
           make test-asan
-          mkdir -p build/release-assets
+          mkdir -p release-assets
           PLATFORMS="
             x86:x86-linux-musl:musl
             x86:x86-linux-gnu:glibc
@@ -110,12 +110,12 @@ jobs:
             make dist VERSION="${VERSION}" TARGET_ARCH="${arch}" LIBC="${libc}" \
                  ZIG_TARGET="${target}" ZIG="${ZIG}"
             id="miniddns-${VERSION}-linux-${arch}-${libc}"
-            tar -czf "build/release-assets/${id}.tar.gz" -C dist "${id}"
+            tar -czf "release-assets/${id}.tar.gz" -C dist "${id}"
             echo "::endgroup::"
           done
-          (cd build/release-assets && sha256sum *.tar.gz > SHA256SUMS)
+          (cd release-assets && sha256sum *.tar.gz > SHA256SUMS)
           echo "Built packages:"
-          ls -1 build/release-assets
+          ls -1 release-assets
 
       - name: Generate changelog and release notes
         run: |
@@ -146,8 +146,8 @@ jobs:
             args+=(--prerelease)
           fi
           gh release create "${VERSION}" "${args[@]}" \
-            build/release-assets/*.tar.gz \
-            build/release-assets/SHA256SUMS
+            release-assets/*.tar.gz \
+            release-assets/SHA256SUMS
           echo "Published release ${VERSION} with 8 platform packages"
 
       - name: Dry-run summary
@@ -160,7 +160,7 @@ jobs:
             echo ""
             echo "### Packages built"
             echo ""
-            ls -1 build/release-assets/*.tar.gz
+            ls -1 release-assets/*.tar.gz
             echo ""
             cat build/RELEASE_NOTES.md
           } >> "${GITHUB_STEP_SUMMARY}"

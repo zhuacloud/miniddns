@@ -57,16 +57,16 @@ jobs:
                ZIG_TARGET=x86_64-linux-musl ZIG="${ZIG}"
           make dist VERSION="${V}" TARGET_ARCH=x64 LIBC=glibc \
                ZIG_TARGET=x86_64-linux-gnu ZIG="${ZIG}"
-          mkdir -p build/release-assets
+          mkdir -p release-assets
           for id in "miniddns-${V}-linux-x64-musl" "miniddns-${V}-linux-x64-glibc"; do
-            tar -czf "build/release-assets/${id}.tar.gz" -C dist "${id}"
+            tar -czf "release-assets/${id}.tar.gz" -C dist "${id}"
           done
-          ls -1 build/release-assets
+          ls -1 release-assets
 
       - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:
           name: miniddns-ci-${{ github.run_number }}
-          path: build/release-assets/
+          path: release-assets/
           if-no-files-found: error
           retention-days: 7
