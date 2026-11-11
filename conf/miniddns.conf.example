@@ -1,0 +1,37 @@
+# /etc/miniddns/miniddns.conf            -*- mode: ini -*-
+# miniddns 1.2.0 — copy this file to miniddns.conf and edit; NEVER ship a real token.
+[core]
+instance          = home
+interval_fallback = 900
+debounce_ms       = 1500
+write_memo_ms     = 60000
+log_level         = info
+# 跟随系统 CA 而不是产物快照：
+# ca_bundle       = /etc/ssl/certs/ca-certificates.crt
+
+[detect]
+ipv4_mode      = auto
+ipv6_mode      = iface
+iface_exclude  = lo,docker0,veth*,br-*,virbr*,wg*
+
+[provider]
+id         = cf-main
+kind       = cloudflare
+zone_id    = 023e105f4ecef8ad9ca31a8372d0c353
+token_file = /etc/miniddns/cloudflare.token
+# 若使用 systemd 凭据目录（需在单元里显式 LoadCredential=，见 design.md §12.1）：
+# token_file = $CREDENTIALS_DIRECTORY/cloudflare.token
+
+[record]
+provider    = cf-main
+name        = home.example.com
+type        = A
+ttl         = 60
+proxied     = false
+
+[record]
+provider    = cf-main
+name        = home.example.com
+type        = AAAA
+ttl         = 60
+proxied     = false

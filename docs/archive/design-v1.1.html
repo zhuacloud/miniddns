@@ -1,0 +1,1369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>miniddns — 设计方案与实现规格</title>
+<style>
+:root{
+  --ink:#20293a; --sub:#5c6b7f; --mut:#8b98a8;
+  --accent:#0b5ed7; --accent-2:#0a8f6f;
+  --line:#dfe5ec; --bg:#f2f5f9; --card:#ffffff; --soft:#eef3fa; --soft2:#f7fafc;
+  --warn:#b45309; --danger:#c0392b;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font:15.5px/1.8 "Noto Sans SC","PingFang SC","Microsoft YaHei","Segoe UI",sans-serif}
+.wrap{max-width:1040px;margin:0 auto;padding:34px 22px 90px}
+.hero{background:linear-gradient(135deg,#12233f 0%,#1b3a63 55%,#0b5ed7 130%);color:#fff;border-radius:18px;padding:44px 46px;margin-bottom:26px}
+.hero .kicker{font-size:12.5px;letter-spacing:.22em;color:#9fc1ec;text-transform:uppercase}
+.hero h1{font-size:40px;margin:10px 0 6px;letter-spacing:.04em}
+.hero .sub{font-size:17px;color:#c7d8f2;margin:0}
+.hero .meta{margin-top:14px;font-size:13px;color:#8fb3dd}
+.toc{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px 26px;margin-bottom:34px}
+.toc h3{margin:0 0 12px;font-size:15px;color:var(--sub);letter-spacing:.1em}
+.toc ol{margin:0;padding-left:0;list-style:none;display:grid;grid-template-columns:1fr 1fr;gap:8px 26px}
+.toc a{color:var(--accent);text-decoration:none;font-size:14.5px}
+.toc a:hover{text-decoration:underline}
+.toc .n{display:inline-block;min-width:26px;color:var(--mut);font-family:ui-monospace,monospace;font-size:13px}
+section{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:34px 42px;margin-bottom:30px}
+h2{font-size:26px;margin:0 0 6px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+h2 .num{font-family:ui-monospace,"SF Mono",monospace;font-size:14px;color:#fff;background:var(--accent);border-radius:9px;padding:4px 10px;letter-spacing:.06em}
+h2+p.lead{color:var(--sub);margin:4px 0 22px}
+h3{font-size:19px;margin:34px 0 12px;padding-left:12px;border-left:4px solid var(--accent);color:var(--ink)}
+h4{font-size:16px;margin:24px 0 10px;color:#12355f}
+p{margin:12px 0}
+ul,ol{padding-left:26px;margin:10px 0}
+li{margin:6px 0}
+strong{color:#0e2c52}
+table{border-collapse:collapse;width:100%;margin:18px 0;font-size:14px}
+th{background:var(--soft);text-align:left;font-weight:600}
+th,td{border:1px solid var(--line);padding:8px 12px;vertical-align:top}
+tr:nth-child(even) td{background:#fafcfe}
+table.center td{text-align:center}
+code{font-family:ui-monospace,"SF Mono","Cascadia Code",Consolas,monospace;font-size:.92em;background:#eef1f5;border-radius:5px;padding:2px 6px;color:#173a6e}
+pre{background:#14202e;color:#d8e4f0;border-radius:12px;padding:18px 20px;overflow-x:auto;font-size:13.5px;line-height:1.65;margin:18px 0}
+pre code{background:none;color:inherit;padding:0}
+.callout{border-radius:12px;padding:14px 18px;margin:18px 0;font-size:14.5px}
+.callout.tip{background:#e8f6ef;border:1px solid #b9e3cd}
+.callout.warn{background:#fdf3e7;border:1px solid #f3d8b4}
+.callout.info{background:var(--soft);border:1px solid #cfe0f4}
+.callout.danger{background:#fdeceb;border:1px solid #f1c2bd}
+.callout b.t{display:block;margin-bottom:4px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+
+/* 流程图 */
+.flow{display:flex;flex-direction:column;align-items:center;margin:26px 0;padding:8px 0}
+.flow .row{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;width:100%}
+.node{background:#fff;border:1px solid var(--line);border-radius:11px;padding:9px 14px;min-width:158px;text-align:center;box-shadow:0 1px 2px rgba(16,40,80,.06)}
+.node .t{font-weight:600;font-size:14px;color:#12355f;line-height:1.4}
+.node .d{font-size:11.5px;color:var(--mut);font-family:ui-monospace,monospace;line-height:1.5}
+.node.hl{background:var(--soft);border-color:#b9d2f0}
+.node.core{background:#0e2c52;border-color:#0e2c52}
+.node.core .t{color:#fff}
+.node.core .d{color:#9fc1ec}
+.arrow{color:#9fb2c8;font-size:16px;line-height:1;margin:7px 0;text-align:center}
+.arrow small{display:block;font-size:11px;color:var(--mut);font-family:ui-monospace,monospace;margin-top:2px}
+
+.tag{display:inline-block;font-size:11.5px;font-family:ui-monospace,monospace;border-radius:6px;padding:1px 7px;border:1px solid var(--line);background:var(--soft2);color:var(--sub);vertical-align:2px}
+.tag.must{background:#fdeceb;border-color:#f1c2bd;color:#a13127}
+.tag.opt{background:#eef3fa;border-color:#cfe0f4;color:#20518f}
+.tag.fut{background:#f2f0fa;border-color:#d8d2ef;color:#5a4a9e}
+.tag.ok{background:#e8f6ef;border-color:#b9e3cd;color:#0a6e52}
+
+.chk{list-style:none;padding-left:0}
+.chk li{position:relative;padding-left:26px;margin:7px 0}
+.chk li:before{content:"□";position:absolute;left:2px;color:var(--accent);font-size:15px}
+
+.kv{display:grid;grid-template-columns:150px 1fr;gap:4px 16px;font-size:14px;margin:14px 0}
+.kv dt{color:var(--sub);font-family:ui-monospace,monospace;font-size:13px}
+.kv dd{margin:0}
+footer{text-align:center;color:var(--mut);font-size:13px;padding:10px 0 0}
+
+@media (max-width:760px){.grid2{grid-template-columns:1fr}.toc ol{grid-template-columns:1fr}section{padding:24px 18px}.hero{padding:28px 22px}.kv{grid-template-columns:1fr}}
+@media print{body{background:#fff}section{break-inside:avoid;border:1px solid #ccc}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="hero">
+  <div class="kicker">Implementation Specification</div>
+  <h1>miniddns</h1>
+  <p class="sub">极低资源占用的多提供商动态 DNS 守护进程 —— C99 + netlink + BearSSL</p>
+  <div class="meta">版本 1.1 &nbsp;·&nbsp; 状态：设计冻结，待实现 &nbsp;·&nbsp; 目标读者：实现本项目的工程 agent</div>
+</div>
+
+<div class="toc">
+  <h3>目录</h3>
+  <ol>
+    <li><span class="n">01</span><a href="#s1">目标与非目标</a></li>
+    <li><span class="n">02</span><a href="#s2">架构总览</a></li>
+    <li><span class="n">03</span><a href="#s3">部署布局与路径解析</a></li>
+    <li><span class="n">04</span><a href="#s4">配置文件规范</a></li>
+    <li><span class="n">05</span><a href="#s5">运行时行为规格</a></li>
+    <li><span class="n">06</span><a href="#s6">IP 探测算法</a></li>
+    <li><span class="n">07</span><a href="#s7">Provider 抽象层</a></li>
+    <li><span class="n">08</span><a href="#s8">TLS 与 HTTP 客户端</a></li>
+    <li><span class="n">09</span><a href="#s9">CA 加载器</a></li>
+    <li><span class="n">10</span><a href="#s10">日志规范</a></li>
+    <li><span class="n">11</span><a href="#s11">命令行接口</a></li>
+    <li><span class="n">12</span><a href="#s12">systemd 集成</a></li>
+    <li><span class="n">13</span><a href="#s13">构建与打包</a></li>
+    <li><span class="n">14</span><a href="#s14">测试与验收</a></li>
+    <li><span class="n">15</span><a href="#s15">实施里程碑</a></li>
+    <li><span class="n">16</span><a href="#s16">风险与未决问题</a></li>
+    <li><span class="n">A</span><a href="#sa">附录：常量、错误码、权限</a></li>
+  </ol>
+</div>
+
+<!-- ============================================================ -->
+<section id="s1">
+  <h2><span class="num">01</span>目标与非目标</h2>
+  <p class="lead">先把边界钉死。凡不在“目标”里的功能，一律不实现。</p>
+
+  <h3>目标</h3>
+  <table>
+    <tr><th style="width:150px">维度</th><th>要求</th></tr>
+    <tr><td>资源占用</td><td>常驻 RSS ≤ 2.5 MB；idle CPU 严格为 0（阻塞在 netlink 上）；24 小时累计 CPU ≤ 2 s；静态二进制 ≤ 500 KB</td></tr>
+    <tr><td>响应性</td><td>地址变化后 ≤ 3 s 内发出更新请求（debounce 默认 1.5 s）</td></tr>
+    <tr><td>正确性</td><td>IP 未变化时**零写入请求**；只有变化/缺失时才写；幂等</td></tr>
+    <tr><td>可运维性</td><td>只依赖 systemd + journald；日志结构化、可 grep；无状态文件</td></tr>
+    <tr><td>可移植性</td><td>Debian / Alpine(musl) / OpenWrt 静态运行；无运行时动态库依赖（可选取）</td></tr>
+    <tr><td>可扩展性</td><td>Provider 通过 vtable 插拔；v1 只实现 Cloudflare，接口必须为其后的 deSEC / RFC2136 / DNSPod 留位</td></tr>
+    <tr><td>安全</td><td>证书必须严格校验，失败即中止（fail closed）；API token 不出现在命令行/日志/进程环境里</td></tr>
+  </table>
+
+  <h3>非目标 <span class="tag must">明确不做</span></h3>
+  <ul>
+    <li><strong>不做定时轮询</strong>。事件驱动 + 兜底 timer，绝无“每 N 分钟跑一次”的主循环路径。</li>
+    <li><strong>不做公网 IP 以外的 DNS 管理</strong>：不管理 MX/TXT/CAA，不做 zone 级操作，不做 DNSSEC/NS 配置。</li>
+    <li><strong>不支持 HTTP 代理、HTTP/2、TLS 1.3、客户端证书、AIA 抓取</strong>（见 §16 风险）。</li>
+    <li><strong>不写状态文件</strong>。远端记录是唯一的真相来源（source of truth）。</li>
+    <li><strong>不做 Web UI、不做多进程/多线程</strong>。单线程事件循环。</li>
+  </ul>
+
+  <h3>已冻结的技术选型</h3>
+  <table>
+    <tr><th>决策</th><th>选择</th><th>理由（不可再讨论）</th></tr>
+    <tr><td>语言</td><td>C99</td><td>无运行时开销，静态产物最小</td></tr>
+    <tr><td>地址变化检测</td><td>netlink <code>NETLINK_ROUTE</code> 组播订阅 + 阻塞 <code>recvmsg</code></td><td>内核边沿触发，idle 时零 CPU 零唤醒；无 fork/exec/文本解析</td></tr>
+    <tr><td>TLS</td><td>BearSSL（源码 vendor）</td><td>纯 C、零依赖、默认无 malloc、无 I/O 绑定、MIT</td></tr>
+    <tr><td>HTTP</td><td>自研 HTTP/1.1 最小客户端</td><td>只用 <code>Connection: close</code> 定长/EOF 读取，不需要 chunked/ALPN/h2</td></tr>
+    <tr><td>JSON</td><td>jsmn（单头文件 vendor）</td><td>仅在需要从响应里取 <code>record_id</code> / 错误消息时使用</td></tr>
+    <tr><td>CA</td><td>运行期解析 PEM bundle + mtime 重载</td><td>常驻进程必须能跟上根证书轮换；编译期固化会静默失效</td></tr>
+    <tr><td>配置格式</td><td>INI（<code>[section]</code> + <code>key = value</code>，可重复 section）</td><td>C 实现最省事，允许注释，无转义地狱</td></tr>
+    <tr><td>定时</td><td><code>timerfd</code> + <code>ppoll</code></td><td>与 netlink fd 同一事件循环，不引入信号处理</td></tr>
+  </table>
+</section>
+
+<!-- ============================================================ -->
+<section id="s2">
+  <h2><span class="num">02</span>架构总览</h2>
+  <p class="lead">一条事件流水线，四个可替换的边界：探测、提供者、传输、信任。</p>
+
+  <div class="flow">
+    <div class="row">
+      <div class="node hl"><div class="t">netlink 监听</div><div class="d">RTNLGRP_IPV4/6_IFADDR</div></div>
+      <div class="node hl"><div class="t">兜底 timer</div><div class="d">timerfd · 900s</div></div>
+      <div class="node hl"><div class="t">启动全量 dump</div><div class="d">RTM_GETADDR</div></div>
+    </div>
+    <div class="arrow">▼<small>事件 / 到期 / boot</small></div>
+    <div class="row">
+      <div class="node"><div class="t">debounce + 合并</div><div class="d">ppoll · 1.5s 静默窗</div></div>
+    </div>
+    <div class="arrow">▼<small>一个 cycle</small></div>
+    <div class="row">
+      <div class="node core"><div class="t">core engine</div><div class="d">detect → diff → apply → log</div></div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="row">
+      <div class="node"><div class="t">detect</div><div class="d">iface / external</div></div>
+      <div class="node"><div class="t">provider vtable</div><div class="d">cloudflare | …</div></div>
+    </div>
+    <div class="arrow">▼</div>
+    <div class="row">
+      <div class="node"><div class="t">tls_http</div><div class="d">BearSSL + x509_minimal</div></div>
+      <div class="node"><div class="t">ca_loader</div><div class="d">bundle + mtime reload</div></div>
+    </div>
+  </div>
+
+  <h3>模块与职责</h3>
+  <table>
+    <tr><th style="width:170px">模块</th><th style="width:110px">依赖</th><th>职责</th><th>不做的事</th></tr>
+    <tr><td><code>main.c</code></td><td>全部</td><td>参数解析、配置加载、信号处理、事件循环调度</td><td>不含业务逻辑</td></tr>
+    <tr><td><code>cfg.c</code></td><td>libc</td><td>INI 解析、默认值、交叉校验、路径解析</td><td>不打开任何网络/证书文件</td></tr>
+    <tr><td><code>log.c</code></td><td>libc</td><td>分级日志、结构化 key=value 输出、rate limit</td><td>不做日志轮转（journald 负责）</td></tr>
+    <tr><td><code>nl_addr.c</code></td><td>libc + kernel headers</td><td>netlink socket、订阅、dump、事件解码为 <code>struct mn_addr</code></td><td>不做选择策略（交 detect）</td></tr>
+    <tr><td><code>detect.c</code></td><td>nl_addr, tls_http</td><td>按 §06 规则把地址集合收敛为一个可发布的 IP</td><td>不发 provider 请求</td></tr>
+    <tr><td><code>ca.c</code></td><td>BearSSL</td><td>PEM→trust anchor、mtime 检测重载、到期告警</td><td>不做链验证</td></tr>
+    <tr><td><code>tls_http.c</code></td><td>BearSSL + ca</td><td>HTTPS 请求/响应、错误分类、超时</td><td>不含 provider 语义</td></tr>
+    <tr><td><code>provider.c</code></td><td>tls_http, jsmn</td><td>vtable 注册表、通用 diff/apply 流程</td><td>不含具体 API 细节</td></tr>
+    <tr><td><code>prov_cloudflare.c</code></td><td>provider</td><td>CF API 的 discover/update/create</td><td>不碰 socket/TLS</td></tr>
+    <tr><td><code>json_util.c</code></td><td>jsmn</td><td>封装 jsmn 的取字段/取错误消息</td><td>不做通用 JSON 树</td></tr>
+  </table>
+
+  <div class="callout info">
+    <b class="t">目录骨架</b>
+<pre><code>miniddns/
+├── src/
+│   ├── main.c cfg.c cfg.h log.c log.h
+│   ├── nl_addr.c nl_addr.h detect.c detect.h
+│   ├── ca.c ca.h tls_http.c tls_http.h
+│   ├── provider.c provider.h prov_cloudflare.c
+│   ├── json_util.c json_util.h util.c util.h
+├── third_party/
+│   ├── bearssl/{inc,src}        # 源码 vendor，不加子模块
+│   └── jsmn/jsmn.h
+├── systemd/                     # ★ 随源码分发，随产物打包
+│   ├── miniddns.service.in      # 模板（@BINDIR@ / @CONFDIR@ / @DOCDIR@ 占位）
+│   └── miniddns.service         # 已按默认 PREFIX=/opt/miniddns 生成的成品
+├── install.sh                   # 一键安装（替换占位符 + daemon-reload）
+├── openwrt/files/miniddns.init  # procd 脚本（OpenWrt 无 systemd，见 §12.6）
+├── tests/                       # 单元 + 集成 + 故障注入
+├── dist/                        # make dist 产物
+├── Makefile
+├── conf/miniddns.conf.example
+└── doc/design.html</code></pre>
+  </div>
+  <div class="callout info">
+    <b class="t">systemd 单元属于源码，不是部署者的手工作业</b>
+    <p>本项目的单元文件<strong>必须随源码提交、随 <code>make dist</code> 打包</strong>，且与二进制一起纳入版本管理。理由：加固清单（<code>AF_NETLINK</code>、<code>PrivateNetwork</code> 禁忌）是正确性的一部分，任何人的手抄版本都可能漏项。详见 §12。</p>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s3">
+  <h2><span class="num">03</span>部署布局与路径解析</h2>
+  <p class="lead">自包含优先：程序目录下的 <code>conf/</code> 是默认配置位置，缺失时才回落到系统 <code>/etc</code>。</p>
+
+  <h3>发布产物布局（artifact root）</h3>
+<pre><code>miniddns-1.0.0-x86_64-musl/
+├── bin/miniddns                     # 静态二进制，ldd =&gt; not a dynamic executable
+├── conf/miniddns.conf.example       # 模板；&#42;注意&#42; 不叫 miniddns.conf（见下）
+├── ca/ca-certificates.crt           # 全量 CA 快照（兜底）
+├── ca/README                        # 快照日期 + sha256 + 来源说明
+└── doc/design.html                  # 本文档</code></pre>
+
+  <div class="callout warn">
+    <b class="t">为什么示例文件必须叫 <code>.example</code></b>
+    <p>程序目录的 <code>conf/</code> 优先级高于 <code>/etc</code>。如果包里自带 <code>conf/miniddns.conf</code>，用户放在 <code>/etc/miniddns/</code> 的覆盖配置就永远不生效。因此：</p>
+    <ul style="margin:6px 0">
+      <li><strong>便携模式</strong>：用户自己 <code>cp miniddns.conf.example conf/miniddns.conf</code> → 程序目录配置生效</li>
+      <li><strong>系统打包模式</strong>：包内只放 <code>.example</code> → 自动回落到 <code>/etc/miniddns/miniddns.conf</code></li>
+      <li><strong>OpenWrt</strong>：同一机制，<code>/usr/share/miniddns/conf/</code> 只放 example，用户配置在 <code>/etc/miniddns/</code>（overlay 可写）</li>
+    </ul>
+  </div>
+
+  <h3>artifact root 的确定方式</h3>
+  <p><strong>必须</strong>用 <code>readlink("/proc/self/exe")</code> 取真实路径，<strong>禁止</strong>使用 <code>argv[0]</code> 或当前工作目录（CWD 在 daemon 下不可信）。然后依次探测：</p>
+  <ol>
+    <li><code>dir = dirname(exe)</code>：若 <code>dir/conf</code> 或 <code>dir/ca</code> 存在 → <code>root = dir</code>（扁平布局 <code>miniddns</code> + <code>conf/</code> 同级）</li>
+    <li>否则若 <code>dirname(dir)/conf</code> 或 <code>dirname(dir)/ca</code> 存在 → <code>root = dirname(dir)</code>（<code>bin/miniddns</code> 布局）</li>
+    <li>否则 <code>root = NULL</code>（纯系统安装，全部走 <code>/etc</code> 与系统 CA）</li>
+  </ol>
+
+  <h3>配置文件的查找顺序</h3>
+  <table>
+    <tr><th style="width:60px">优先级</th><th style="width:280px">路径</th><th>说明</th></tr>
+    <tr><td>1</td><td><code>--config &lt;path&gt;</code></td><td>命令行显式指定；不存在即<strong>报错退出</strong>（不回落）</td></tr>
+    <tr><td>2</td><td><code>&lt;root&gt;/conf/miniddns.conf</code></td><td>程序目录自带配置（便携模式）</td></tr>
+    <tr><td>3</td><td><code>/etc/miniddns/miniddns.conf</code></td><td>系统安装位置</td></tr>
+  </table>
+  <p>都找不到 → <code>exit(1)</code>，日志给出所有尝试过的路径。<strong>启动日志必须打印实际使用的配置文件路径</strong>（这是排障第一信息）。</p>
+
+  <h3>CA bundle 的查找顺序</h3>
+  <table>
+    <tr><th style="width:60px">优先级</th><th style="width:340px">路径</th><th>说明</th></tr>
+    <tr><td>1</td><td>配置项 <code>core.ca_bundle</code></td><td>显式指定；加载失败即 <code>exit(1)</code>，<strong>不回落</strong></td></tr>
+    <tr><td>2</td><td><code>&lt;root&gt;/ca/ca-certificates.crt</code></td><td>产物自带快照（兜底，见 §09）</td></tr>
+    <tr><td>3</td><td><code>/etc/ssl/certs/ca-certificates.crt</code></td><td>Debian / OpenWrt (<code>ca-bundle</code>)</td></tr>
+    <tr><td>4</td><td><code>/etc/pki/tls/certs/ca-bundle.crt</code></td><td>RHEL 系</td></tr>
+    <tr><td>5</td><td><code>/etc/ssl/cert.pem</code></td><td>Alpine</td></tr>
+    <tr><td>6</td><td><code>/etc/ssl/ca-bundle.pem</code></td><td>openSUSE</td></tr>
+  </table>
+  <div class="callout warn">
+    <b class="t">内置快照优先于系统 CA 的代价</b>
+    <p>程序目录优先意味着系统 CA 更新不会自动生效。这不致命，因为 §09 的 <code>notAfter</code> 告警 + <code>--check-ca</code> 自检会把问题暴露在装机当天。若部署方希望跟随系统 CA，在配置里写 <code>ca_bundle = /etc/ssl/certs/ca-certificates.crt</code> 并把 <code>ca/</code> 目录删掉即可。</p>
+  </div>
+
+  <h3>文件权限校验 <span class="tag must">强制</span></h3>
+  <p>打开配置文件、CA bundle、token 文件之前，必须 <code>stat()</code> 并拒绝以下情况（日志给出明确原因）：</p>
+<pre><code>st_uid != 0                      → "owner is not root"        (可用 --allow-non-root-owner 覆盖)
+st_mode &amp; (S_IWGRP|S_IWOTH)      → "group/world writable"     (无覆盖选项，硬失败)
+S_ISLNK(st_mode)                 → 拒绝符号链接（用 O_NOFOLLOW 打开）
+非普通文件                        → 拒绝 (S_ISREG)
+大小 &gt; 2 MiB (CA) / &gt; 256 KiB (conf/token) → 拒绝</code></pre>
+  <p>打开时必须 <code>open(path, O_RDONLY|O_NOFOLLOW|O_CLOEXEC)</code>。理由：能改写 CA bundle 或 token 的人即可 MITM 你的请求。</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="s4">
+  <h2><span class="num">04</span>配置文件规范</h2>
+  <p class="lead">INI 子集：<code>[section]</code> + <code>key = value</code>。<code>[record]</code> 与 <code>[provider]</code> 可重复出现。</p>
+
+  <h3>语法规则（解析器必须严格实现）</h3>
+  <ul>
+    <li>行首行尾空白忽略；空行与纯注释行忽略；注释以 <code>#</code> 或 <code>;</code> 起始（<strong>仅在行首</strong>，不做行尾注释，避免 token 里出现 <code>#</code> 被截断）</li>
+    <li><code>key</code> 与 <code>value</code> 大小写不敏感（key）；value 保持原样并 trim 两侧空白</li>
+    <li>不支持续行、不支持引号、不支持转义</li>
+    <li><strong>未知 key、未知 section、重复的非重复 key → 硬错误并给出行号</strong>（拼写错误必须当场发现，不能静默忽略）</li>
+    <li>值中的 <code>${ENV}</code> <strong>不展开</strong>（避免 token 走环境变量）</li>
+    <li>同一 <code>[record]</code> 内 <code>(provider, name, type)</code> 必须唯一，重复即报错</li>
+  </ul>
+
+  <h3><code>[core]</code></h3>
+  <table>
+    <tr><th style="width:190px">key</th><th style="width:130px">默认</th><th>说明</th></tr>
+    <tr><td><code>instance</code></td><td><code>default</code></td><td>实例名，用于 lock 文件与日志标识。仅允许 <code>[A-Za-z0-9._-]</code></td></tr>
+    <tr><td><code>interval_fallback</code></td><td><code>900</code></td><td>兜底同步周期（秒）。<code>0</code> = 禁用（不推荐）</td></tr>
+    <tr><td><code>debounce_ms</code></td><td><code>1500</code></td><td>事件合并静默窗（毫秒），见 §05.3</td></tr>
+    <tr><td><code>ca_bundle</code></td><td><em>空</em></td><td>CA PEM bundle 路径，空 = 按 §03 顺序探测</td></tr>
+    <tr><td><code>http_timeout_ms</code></td><td><code>8000</code></td><td>单次 HTTP 请求总超时</td></tr>
+    <tr><td><code>connect_timeout_ms</code></td><td><code>5000</code></td><td>TCP 连接 + TLS 握手超时</td></tr>
+    <tr><td><code>retry_backoff</code></td><td><code>5,15,60,300</code></td><td>失败后的重试间隔序列（秒），用尽后固定在最后一个值</td></tr>
+    <tr><td><code>log_level</code></td><td><code>info</code></td><td><code>error|warn|info|debug</code></td></tr>
+    <tr><td><code>log_target</code></td><td><code>journald</code></td><td><code>journald</code>（=stderr）<code>|file</code></td></tr>
+    <tr><td><code>log_file</code></td><td><em>空</em></td><td><code>log_target=file</code> 时必填</td></tr>
+    <tr><td><code>lock_file</code></td><td><em>自动</em></td><td>默认 <code>$RUNTIME_DIRECTORY/miniddns.lock</code>，无 <code>RUNTIME_DIRECTORY</code> 时 <code>/run/miniddns/miniddns.lock</code>，再失败用 <code>/tmp</code></td></tr>
+    <tr><td><code>clock_guard_epoch</code></td><td><code>1700000000</code></td><td>系统时间早于此值视为时钟未同步（§05.6）</td></tr>
+  </table>
+
+  <h3><code>[detect]</code></h3>
+  <table>
+    <tr><th style="width:190px">key</th><th style="width:150px">默认</th><th>说明</th></tr>
+    <tr><td><code>ipv4_mode</code></td><td><code>auto</code></td><td><code>off | iface | external | auto</code></td></tr>
+    <tr><td><code>ipv6_mode</code></td><td><code>auto</code></td><td><code>off | iface</code>（IPv6 无 NAT，故无 external）</td></tr>
+    <tr><td><code>iface_include</code></td><td><em>空</em></td><td>逗号分隔的接口名白名单；空 = 所有接口</td></tr>
+    <tr><td><code>iface_exclude</code></td><td><code>lo,docker0,veth*,br-*,virbr*,tun*,tap*,wg*</code></td><td>逗号分隔，支持尾部 <code>*</code> 通配</td></tr>
+    <tr><td><code>ipv4_echo_url</code></td><td>见下</td><td>逗号分隔的探测端点，按序尝试</td></tr>
+    <tr><td><code>allow_private_ipv4</code></td><td><code>false</code></td><td>为 true 时允把私网地址当作待发布 IP（<strong>仅测试用</strong>，Cloudflare 会拒绝）</td></tr>
+    <tr><td><code>allow_temporary_ipv6</code></td><td><code>false</code></td><td>是否允许发布隐私扩展临时地址（不建议）</td></tr>
+  </table>
+<pre><code>ipv4_echo_url = https://api.ipify.org,https://ipv4.icanhazip.com,https://ipv4.ident.me</code></pre>
+
+  <h3><code>[provider]</code>（可重复）</h3>
+  <table>
+    <tr><th style="width:190px">key</th><th style="width:120px">必填</th><th>说明</th></tr>
+    <tr><td><code>id</code></td><td>是</td><td>本文件中唯一的实例标识，供 <code>[record].provider</code> 引用</td></tr>
+    <tr><td><code>kind</code></td><td>是</td><td>Provider 类型，v1 只支持 <code>cloudflare</code></td></tr>
+    <tr><td colspan="3" style="background:var(--soft)"><strong>Cloudflare 专属</strong></td></tr>
+    <tr><td><code>zone_id</code></td><td>是</td><td>Zone ID（32 位 hex）。v1 <strong>不</strong>按 zone 名自动解析</td></tr>
+    <tr><td><code>token_file</code></td><td>是</td><td>API Token 文件路径（0600），读第一行并 trim。支持 <code>$CREDENTIALS_DIRECTORY</code> 展开（见下）</td></tr>
+    <tr><td><code>token</code></td><td>否</td><td>内联 token，<strong>仅测试用</strong>；存在时打 warn 日志</td></tr>
+  </table>
+  <div class="callout info">
+    <b class="t">token_file 的 <code>$CREDENTIALS_DIRECTORY</code> 展开（唯一允许的变量展开）</b>
+    <p>若值以 <code>$CREDENTIALS_DIRECTORY/</code> 开头，则替换为 systemd 设置的 <code>CREDENTIALS_DIRECTORY</code> 环境变量值；该变量不存在时报错。配合 <code>LoadCredential=cloudflare.token:/etc/miniddns/cloudflare.token</code>，token 只出现在内存 tmpfs 里，不落盘、不进环境。</p>
+  </div>
+
+  <h3><code>[record]</code>（可重复）</h3>
+  <table>
+    <tr><th style="width:190px">key</th><th style="width:120px">默认</th><th>说明</th></tr>
+    <tr><td><code>provider</code></td><td>必填</td><td>引用某个 <code>[provider].id</code></td></tr>
+    <tr><td><code>name</code></td><td>必填</td><td>完整记录名（FQDN，不带结尾点）。校验：≤253 字符、只含 <code>[A-Za-z0-9.-_]</code>、至少一个点</td></tr>
+    <tr><td><code>type</code></td><td>必填</td><td><code>A</code> 或 <code>AAAA</code>（大写，大小写不敏感输入）</td></tr>
+    <tr><td><code>ttl</code></td><td><code>60</code></td><td>创建时使用；更新时不覆盖（见 §07.4）。范围 60–86400，或 <code>1</code> 表示 Auto</td></tr>
+    <tr><td><code>proxied</code></td><td><code>false</code></td><td>仅创建时使用；更新时不覆盖</td></tr>
+    <tr><td><code>record_id</code></td><td><em>空</em></td><td>预置的远端记录 ID。填写则跳过 discover（省一次 API 调用，也不需要 JSON 解析）</td></tr>
+    <tr><td><code>create_if_missing</code></td><td><code>true</code></td><td>远端不存在时是否创建</td></tr>
+    <tr><td><code>enabled</code></td><td><code>true</code></td><td>临时禁用某条记录</td></tr>
+  </table>
+
+  <h3>完整示例</h3>
+<pre><code># /etc/miniddns/miniddns.conf            -*- mode: ini -*-
+[core]
+instance          = home
+interval_fallback = 900
+debounce_ms       = 1500
+log_level         = info
+# 跟随系统 CA 而不是产物快照：
+# ca_bundle       = /etc/ssl/certs/ca-certificates.crt
+
+[detect]
+ipv4_mode      = auto
+ipv6_mode      = auto
+iface_exclude  = lo,docker0,veth*,br-*,virbr*,wg*
+
+[provider]
+id         = cf-main
+kind       = cloudflare
+zone_id    = 023e105f4ecef8ad9ca31a8372d0c353
+token_file = $CREDENTIALS_DIRECTORY/cloudflare.token
+
+[record]
+provider    = cf-main
+name        = home.example.com
+type        = A
+ttl         = 60
+proxied     = false
+
+[record]
+provider    = cf-main
+name        = home.example.com
+type        = AAAA
+ttl         = 60
+proxied     = false
+# 已手工查好，省一次 GET：
+# record_id = 372e67954025e0ba6aaa6d586b9e0b59</code></pre>
+</section>
+
+<!-- ============================================================ -->
+<section id="s5">
+  <h2><span class="num">05</span>运行时行为规格</h2>
+  <p class="lead">单线程，两个 fd，一个 ppoll。没有任何周期性的“检查”。</p>
+
+  <h3>05.1 进程生命周期</h3>
+<pre><code>main()
+ ├─ 解析 CLI
+ ├─ 定位配置文件 → 解析 → 校验                    失败 → exit(1)
+ ├─ 打开并 flock(lock_file, LOCK_EX|LOCK_NB)      已占用 → log+exit(0)
+ ├─ 加载 CA（§09）                                 失败 → exit(1)
+ ├─ provider 注册与 init（token 读取、配置校验）    失败 → exit(1)
+ ├─ nl_open()：socket + bind(组) + 首次全量 dump    失败 → exit(1)
+ ├─ install SIGTERM/SIGINT → signalfd 或 self-pipe
+ ├─ 一次启动 cycle（reason=boot）                  IP 相同 → 零写入
+ └─ loop:
+      ppoll([nl_fd, timer_fd, sig_fd], 无限)
+        · nl_fd 可读     → 读事件 → 标记 pending → 启动 debounce 窗口
+        · debounce 到期  → cycle(reason=event)
+        · timer_fd 到期  → cycle(reason=timer)
+        · sig_fd 可读    → 清理后 exit(0)</code></pre>
+  <div class="callout info">
+    <b class="t">为什么用 signalfd 而不是信号处理函数</b>
+    <p>异步信号会打断 <code>ppoll</code>/<code>recvmsg</code>/TLS 状态机，处理不当就是 <code>EINTR</code> 地狱。用 <code>signalfd</code> 把信号变成 fd 可读事件，退出路径唯一且可重入。必须 <code>sigprocmask(SIG_BLOCK)</code> 这三个信号之后再 <code>signalfd</code>。</p>
+  </div>
+
+  <h3>05.2 netlink 监听</h3>
+  <table>
+    <tr><th style="width:200px">项</th><th>规格</th></tr>
+    <tr><td>socket</td><td><code>socket(AF_NETLINK, SOCK_RAW|SOCK_CLOEXEC, NETLINK_ROUTE)</code></td></tr>
+    <tr><td>订阅组</td><td><code>RTNLGRP_IPV4_IFADDR</code> | <code>RTNLGRP_IPV6_IFADDR</code>；<code>bind()</code> 时用 <code>nl_groups</code> 位掩码（<code>1 &lt;&lt; (RTNLGRP_x - 1)</code>）</td></tr>
+    <tr><td>顺序</td><td><strong>先 bind 订阅，再发 <code>RTM_GETADDR</code> dump</strong>。反过来会丢失两者之间的变化</td></tr>
+    <tr><td>dump</td><td><code>RTM_GETADDR</code> + <code>NLM_F_REQUEST|NLM_F_DUMP</code>，<code>nlmsg_seq</code> 唯一；用 <code>NLMSG_DONE</code>/<code>NLMSG_ERROR</code> 终止；后续收到 <code>nlmsg_seq</code> 不同的事件即进入事件模式</td></tr>
+    <tr><td>接收缓冲</td><td><code>setsockopt(SO_RCVBUF, 1 MiB)</code></td></tr>
+    <tr><td>读取</td><td>每次 <code>recvmsg</code> 读 32 KiB，循环 <code>NLMSG_OK</code> 遍历。必须处理消息被拆分（<code>NLMSG_DONE</code> 之外的截断靠 buffer 大小避免）</td></tr>
+    <tr><td>关注的事件</td><td><code>RTM_NEWADDR</code>、<code>RTM_DELADDR</code>；<code>RTM_NEWLINK</code>/<code>RTM_DELLINK</code> 也订阅（<code>RTNLGRP_LINK</code>）以便接口 down/up 时重新评估</td></tr>
+    <tr><td>解码内容</td><td><code>ifaddrmsg</code>{family, prefixlen, flags, scope, index} + attrs：<code>IFA_ADDRESS</code>、<code>IFA_LOCAL</code>、<code>IFA_FLAGS</code>（32 位，优先于 <code>ifa_flags</code> 那 8 位）、<code>IFA_CACHEINFO</code>（valid/preferred lifetime）、<code>IFA_LABEL</code></td></tr>
+    <tr><td><code>ENOBUFS</code></td><td><strong>必须</strong>：收到即 log warn + 重新执行一次 <code>RTM_GETADDR</code> 全量 dump 重建状态（说明内核丢事件，状态不可信）</td></tr>
+    <tr><td>权限</td><td>不需要 root、不需要 <code>CAP_NET_ADMIN</code></td></tr>
+  </table>
+  <div class="callout warn">
+    <b class="t">不要只靠事件维护状态</b>
+    <p>实现上应把“地址集合”当作可由 dump 重建的缓存，事件只用来<b>触发</b>重新评估。任何不确定状态（<code>ENOBUFS</code>、dump 失败、接口 down）都走“重新 dump”这条路径，而不是试图增量修补。</p>
+  </div>
+
+  <h3>05.3 debounce 与触发源</h3>
+  <p>一次地址变化会产生多条事件（<code>tentative</code>→<code>preferred</code>、deprecate、临时地址增删）。因此：</p>
+  <ul>
+    <li>收到任意事件 → 置 <code>pending=1</code>，并把 debounce deadline 设为 <code>now + debounce_ms</code></li>
+    <li>debounce 窗口内再来的事件 → <strong>重置</strong> deadline（滑窗静默）</li>
+    <li>窗口静默到期 → 执行一次 cycle，清 <code>pending</code></li>
+    <li>连续事件导致 deadline 不断后移时，设硬上限 <code>max_defer = 10 × debounce_ms</code>，超时强制执行（防止 ISP 抖动导致永不执行）</li>
+    <li>兜底 timer 到期时若 <code>pending=1</code>，直接执行 cycle 并清 pending</li>
+  </ul>
+
+  <h3>05.4 cycle 伪代码（Provider 无关）</h3>
+<pre><code>cycle(reason):
+  log_info("cycle start reason=%s", reason)
+  addrs = nl_rescan()                     # 全量 dump，不依赖事件增量
+  for rec in records where enabled:
+      if rec.type == A:   want = detect_ipv4(addrs)
+      else:               want = detect_ipv6(addrs)
+      if (!want):
+          log_info("record name=%s type=%s action=skip reason=no-ip", ...)
+          continue
+      remote = rec.record_id
+               ? { .id = rec.record_id, .known = false }
+               : provider_discover(rec)       # 失败 → 记为 error，继续下一条
+      if (!remote.found):
+          if (!rec.create_if_missing): skip
+          create → 成功则 log action=create
+      else:
+          if (ip_equal(remote.content, want, rec.type)):
+              log_info("action=unchanged")
+              continue
+          patch_content(remote.id, want) → log action=update old=.. new=..
+  log_info("cycle end ok=%d fail=%d duration_ms=%d")</code></pre>
+  <p><strong>逐条记录独立成败</strong>：一条记录失败不阻止其他记录继续。整体 cycle 结果用于计算重试退避。</p>
+
+  <h3>05.5 重试与退避</h3>
+  <table>
+    <tr><th style="width:170px">情形</th><th>动作</th></tr>
+    <tr><td>cycle 全部成功</td><td>清空退避计数；等待下一次事件或 <code>interval_fallback</code></td></tr>
+    <tr><td>任一记录失败</td><td>按 <code>retry_backoff</code> 序列预约一次 retry（<code>timerfd</code> 重新设定为 min(backoff, interval_fallback)）</td></tr>
+    <tr><td><code>HTTP 429</code> 且带 <code>Retry-After</code></td><td>用 <code>Retry-After</code> 覆盖退避（秒或 HTTP-date 两种格式都要支持）</td></tr>
+    <tr><td><code>E_TLS_CERT</code></td><td>不快速重试（不会自愈）。按退避最大档重试，并保证日志打 error 级</td></tr>
+    <tr><td><code>E_TLS_TIME</code> 且时钟未同步</td><td>走时钟守卫路径（§05.6）</td></tr>
+    <tr><td><code>E_HTTP_4XX</code>（除 429）</td><td>配置/token 问题，不自愈 → 用最大退避档，log error</td></tr>
+  </table>
+
+  <h3>05.6 时钟守卫</h3>
+  <p>OpenWrt 等无 RTC 设备开机时 <code>time()</code> 可能返回 1970。TLS 会以“证书尚未生效”失败，而 CA bundle 完全正常。规则：</p>
+  <ul>
+    <li>任何 HTTPS 请求前检查 <code>time(NULL) &lt; clock_guard_epoch</code></li>
+    <li>命中则 log warn <code>clock not synced</code>，按 30 s 固定间隔重试，<strong>不消耗退避计数</strong>，不计入 cycle 失败统计</li>
+    <li>同时区分日志：时间类错误用 <code>err=tls_time</code>，与 <code>err=tls_cert</code> 严格分开（否则排障会误判为 CA 坏了）</li>
+  </ul>
+
+  <h3>05.7 并发与域名解析</h3>
+  <ul>
+    <li><code>getaddrinfo()</code> 是阻塞的。接受这一点：单线程下 DNS 慢会阻塞事件处理，但<strong>netlink 事件在内核 socket 队列里排队，不会丢失</strong>（§05.2 的 <code>ENOBUFS</code> 处理覆盖极端情况）。</li>
+    <li><code>SO_RCVTIMEO/SO_SNDTIMEO</code> + <code>connect_timeout_ms</code> 保证单次请求有界。</li>
+    <li>runner 内不做任何 <code>fork()</code>。</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="s6">
+  <h2><span class="num">06</span>IP 探测算法</h2>
+  <p class="lead">把地址集合收敛成一个“可以对外发布”的 IP。所有过滤条件都必须显式实现并有单元测试。</p>
+
+  <h3>06.1 地址分类判定表（必须实现为纯函数）</h3>
+  <table>
+    <tr><th style="width:150px">判定</th><th>IPv4 前缀</th><th style="width:220px">IPv6 前缀</th></tr>
+    <tr><td>不可发布：私有</td><td><code>10/8</code> <code>172.16/12</code> <code>192.168/16</code></td><td><code>fc00::/7</code> (ULA)</td></tr>
+    <tr><td>不可发布：CGNAT</td><td><code>100.64/10</code></td><td>—</td></tr>
+    <tr><td>不可发布：回环/链路本地</td><td><code>127/8</code> <code>169.254/16</code></td><td><code>::1</code> <code>fe80::/10</code></td></tr>
+    <tr><td>不可发布：保留/文档/组播</td><td><code>0.0.0.0/8</code> <code>192.0.2/24</code> <code>198.18/15</code> <code>198.51.100/24</code> <code>203.0.113/24</code> <code>224/4</code> <code>240/4</code></td><td><code>::/128</code> <code>ff00::/8</code> <code>2001:db8::/32</code></td></tr>
+    <tr><td>可发布</td><td>其余全局单播</td><td>其余全局单播（<code>2000::/3</code>）</td></tr>
+  </table>
+
+  <h3>06.2 IPv4 选择</h3>
+  <table>
+    <tr><th style="width:120px">mode</th><th>行为</th></tr>
+    <tr><td><code>off</code></td><td>返回“无”。所有 A 记录记 <code>action=skip reason=ipv4-off</code></td></tr>
+    <tr><td><code>iface</code></td><td>从 dump 中取 scope=global 且通过 <code>iface_include/exclude</code> 的 IPv4；<strong>若为私有/CGNAT → 视为“无公网 IPv4”并 log 明确原因</strong>（<code>allow_private_ipv4=true</code> 时例外）；多个候选按 §06.4 排序取第一个</td></tr>
+    <tr><td><code>external</code></td><td>依次请求 <code>ipv4_echo_url</code>，对响应体 trim 后做 IPv4 语法 + 分类校验；第一个合法结果胜出；<strong>允许跟随最多 3 次重定向，但只允许同 scheme(https) 且 host 在白名单内</strong></td></tr>
+    <tr><td><code>auto</code></td><td>先 <code>iface</code>；得到公网地址则用之，否则退到 <code>external</code>。两者都失败 → “无”</td></tr>
+  </table>
+  <div class="callout danger">
+    <b class="t">必须拦截私有 IPv4</b>
+    <p>Cloudflare 会拒绝私有/保留地址作为 A 记录内容并返回 API 错误。若不在此处拦截，你的日志会变成每 15 分钟一条无意义的 API 错误。这是本方案里最容易被漏掉的一条。</p>
+  </div>
+
+  <h3>06.3 IPv6 选择</h3>
+  <p>候选必须同时满足：</p>
+  <ul>
+    <li><code>ifa_family == AF_INET6</code>，<code>scope == RT_SCOPE_UNIVERSE</code>（global）</li>
+    <li><code>IFA_FLAGS</code> 不含：<code>IFA_F_TEMPORARY</code>(0x01)、<code>IFA_F_DEPRECATED</code>(0x20)、<code>IFA_F_TENTATIVE</code>(0x40)、<code>IFA_F_DADFAILED</code>(0x08)、<code>IFA_F_OPTIMISTIC</code>(0x04)</li>
+    <li>（<code>allow_temporary_ipv6=true</code> 时豁免 <code>TEMPORARY</code>）</li>
+    <li><code>IFA_CACHEINFO.ifa_valid</code> &gt; 0（不为 <code>0sec</code>）</li>
+    <li>不落在 §06.1 的不可发布前缀</li>
+    <li>接口名通过 include/exclude 过滤</li>
+  </ul>
+  <p>全部被过滤掉时返回“无”，并 log：<code>action=skip reason=no-publishable-ipv6 candidates=3 filtered=temporary=2,dadfailed=1</code>。这条日志在排障时几乎总是你要的第一条。</p>
+
+  <h3>06.4 确定性排序（防抖动）</h3>
+  <p>多个候选必须按<strong>与地址插入顺序无关</strong>的规则取一个，否则顺序变化会被误判为“IP 变了”：</p>
+  <ol>
+    <li>地址字节序升序（v4 用 <code>struct in_addr.s_addr</code> 网络序转 host 后比较；v6 用 <code>memcmp</code> 16 字节）</li>
+    <li>取第一个</li>
+  </ol>
+  <p>若配置了多个网卡且需要优先级，用 <code>iface_include</code> 只留一个接口——v1 不实现“按接口优先级排序”。</p>
+
+  <h3>06.5 规范化比较</h3>
+  <ul>
+    <li>IPv4：格式化为 <code>a.b.c.d</code>（无前导零）后字符串比较</li>
+    <li>IPv6：<strong>展开为 8 组 16 位十六进制的规范形式再比较</strong>（<code>2001:db8::1</code> 与 <code>2001:0db8:0:0:0:0:0:1</code> 必须判定相等）。实现：解析成 <code>uint16_t[8]</code> 后逐元素比较，<strong>不要</strong>用 <code>strcmp</code> 处理 <code>::</code></li>
+    <li>发布给 provider 的形式：RFC 5952 压缩小写形式（inet_ntop 输出即为该形式）</li>
+    <li>从远端读回的 content 也要走同一套规范化后再比较</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="s7">
+  <h2><span class="num">07</span>Provider 抽象层</h2>
+  <p class="lead">这是本项目唯一需要“为未来设计”的地方。v1 只实现 Cloudflare，但接口必须容纳差异巨大的其他厂商。</p>
+
+  <h3>07.1 数据模型</h3>
+<pre><code>struct mn_record_cfg {          /* 来自配置文件 */
+    const char *name;           /* FQDN */
+    int         family;         /* AF_INET | AF_INET6 */
+    int         ttl;
+    int         proxied;
+    const char *record_id;      /* 可空 */
+    int         create_if_missing;
+    struct mn_provider *prov;
+};
+
+struct mn_remote {              /* 远端现状 */
+    int  found;                 /* 0 = 不存在 */
+    char id[64];                /* 厂商侧记录标识，长度由 providers 自己约束 */
+    char content[MN_IP_STRLEN]; /* 已规范化 */
+    int  changed_by_us;         /* 预留，当前恒 0 */
+};</code></pre>
+
+  <h3>07.2 vtable</h3>
+<pre><code>#define MN_CAP_PATCH_CONTENT  (1u &lt;&lt; 0)  /* 支持只改 content 的局部更新 */
+#define MN_CAP_CREATE         (1u &lt;&lt; 1)  /* 支持创建记录 */
+#define MN_CAP_TTL            (1u &lt;&lt; 2)  /* 创建时可指定 TTL */
+#define MN_CAP_PROXY          (1u &lt;&lt; 3)  /* 支持代理/CDN 开关 */
+#define MN_CAP_DISCOVER       (1u &lt;&lt; 4)  /* 支持按 name+type 查询 */
+
+struct mn_provider_ops {
+    const char *kind;                       /* "cloudflare" */
+    unsigned    caps;
+
+    /* 校验配置、加载凭据。失败返回负数并写 err */
+    int  (*init)(struct mn_provider *p, const struct mn_cfg *cfg,
+                 const char *prov_id, char *err, size_t errlen);
+
+    /* 查询 name+family 的现状。未找到返回 0 且 out-&gt;found=0 */
+    int  (*discover)(struct mn_provider *p, const struct mn_record_cfg *rc,
+                     struct mn_remote *out, char *err, size_t errlen);
+
+    /* 只更新 content（MN_CAP_PATCH_CONTENT 必须置位） */
+    int  (*update)(struct mn_provider *p, const struct mn_record_cfg *rc,
+                   const struct mn_remote *cur, const char *ip,
+                   char *err, size_t errlen);
+
+    /* 创建（MN_CAP_CREATE 必须置位）；成功时回填 out-&gt;id */
+    int  (*create)(struct mn_provider *p, const struct mn_record_cfg *rc,
+                   const char *ip, struct mn_remote *out,
+                   char *err, size_t errlen);
+
+    void (*fini)(struct mn_provider *p);
+};
+
+/* 注册表 */
+const struct mn_provider_ops *mn_provider_lookup(const char *kind);</code></pre>
+
+  <div class="callout info">
+    <b class="t">为什么 <code>update()</code> 拿得到 <code>cur</code></b>
+    <p>因为有些厂商（RFC2136、部分 API）需要提交完整记录集/整个 RRset 才能改一条，需要旧的 TTL/proxied/其他值。把 <code>cur</code> 传进去，这些厂商才能用同一套 core 流程。</p>
+  </div>
+
+  <h3>07.3 Cloudflare 实现规格</h3>
+  <table>
+    <tr><th style="width:130px">操作</th><th>HTTP</th></tr>
+    <tr><td>discover</td><td><code>GET /client/v4/zones/{zone_id}/dns_records?type={A|AAAA}&amp;name={fqdn}</code><br>取 <code>result[0]</code>：<code>.id</code>、<code>.content</code>。0 条 → <code>found=0</code>；&gt;1 条 → log warn 并用第一条</td></tr>
+    <tr><td>update</td><td><code>PATCH /client/v4/zones/{zone_id}/dns_records/{record_id}</code><br>body <code>{"content":"&lt;ip&gt;"}</code> —— <strong>只发 content</strong></td></tr>
+    <tr><td>create</td><td><code>POST /client/v4/zones/{zone_id}/dns_records</code><br>body <code>{"type":"A","name":"&lt;fqdn&gt;","content":"&lt;ip&gt;","ttl":60,"proxied":false}</code></td></tr>
+    <tr><td>认证</td><td><code>Authorization: Bearer &lt;token&gt;</code>。仅 API Token；<strong>不支持</strong> <code>X-Auth-Email/X-Auth-Key</code> 全局密钥</td></tr>
+    <tr><td>成功判定</td><td>HTTP 2xx <strong>且</strong> body <code>.success == true</code>。两者都要检查</td></tr>
+    <tr><td>失败信息</td><td>取 <code>.errors[0].code</code> / <code>.errors[0].message</code> 写进日志的 <code>api_code</code> / <code>api_msg</code> 字段</td></tr>
+    <tr><td>限速</td><td>API 侧 1200 req/5min/user，本方案远低于此；仍必须处理 <code>429</code> + <code>Retry-After</code></td></tr>
+  </table>
+  <div class="callout danger">
+    <b class="t">绝对禁止 <code>PUT /dns_records/{id}</code></b>
+    <p>PUT 是整体替换，会把用户手工设置的 <code>proxied</code>、<code>ttl</code>、<code>comment</code>、<code>tags</code> 全部重置。只允许 PATCH 且只带 <code>content</code>。此规则必须有集成测试守护（断言请求体里只出现 <code>content</code> 一个键）。</p>
+  </div>
+  <p><strong>Token 权限（写进文档）</strong>：<code>Zone → DNS → Edit</code>，Zone Resources 限定到具体 zone。禁止使用 Global API Key。</p>
+
+  <h3>07.4 TTL / proxied 的“只创建不修改”规则</h3>
+  <p>更新路径<strong>不</strong>发送 <code>ttl</code>/<code>proxied</code>。理由：这两个字段属于用户意图（是否走 CDN、缓存多久），不该被 DDNS 守护进程覆盖。配置里的 <code>ttl</code>/<code>proxied</code> 只在创建时生效。若用户改了配置的 TTL，需要手工或用 CLI 单独处理（v1 不提供）。</p>
+
+  <h3>07.5 未来 provider 的差异矩阵（用来验证 vtable 够不够用）</h3>
+  <table>
+    <tr><th>Provider</th><th>标识</th><th>认证</th><th>局部更新</th><th>需要的额外能力</th></tr>
+    <tr><td>Cloudflare</td><td>record_id</td><td>Bearer token</td><td>✅ PATCH</td><td>—</td></tr>
+    <tr><td>deSEC</td><td>相对域名</td><td>Token</td><td>✅ PATCH</td><td>相对名换算</td></tr>
+    <tr><td>DNSPod / 阿里云</td><td>record_id + domain_id</td><td>ID/Secret 签名</td><td>✅ 专用接口</td><td>请求签名（HMAC）</td></tr>
+    <tr><td>RFC 2136 (nsupdate)</td><td>无</td><td>TSIG</td><td>❌ 需整 RRset 替换</td><td>DNS 报文编解码 + TSIG</td></tr>
+    <tr><td>Route53</td><td>无（按 RRset）</td><td>SigV4</td><td>❌ 需整 RRset</td><td>AWS 签名 + XML</td></tr>
+  </table>
+  <p>结论：<code>mn_remote.id</code> 用字符串而非整数、<code>update()</code> 接收 <code>cur</code>、core 不假设 GET 一定存在——这三点已覆盖上表所有差异。<span class="tag fut">v1 不实现任何非 Cloudflare provider</span></p>
+</section>
+
+<!-- ============================================================ -->
+<section id="s8">
+  <h2><span class="num">08</span>TLS 与 HTTP 客户端</h2>
+  <p class="lead">只做一件事：把一个定长 body 发到 https 端点，读回整个响应。别写成通用客户端。</p>
+
+  <h3>08.1 BearSSL 集成要点 <span class="tag must">逐条实现</span></h3>
+  <table>
+    <tr><th style="width:230px">项</th><th>规格</th></tr>
+    <tr><td>上下文</td><td><code>br_ssl_client_context</code> + <code>br_x509_minimal_context</code> + <code>br_sslio_context</code>，放在 <code>struct mn_tls</code> 里，<strong>不 malloc</strong>（静态分配或调用方提供）</td></tr>
+    <tr><td>套件</td><td><code>br_ssl_client_init_full(&amp;sc, &amp;xc, anchors, n_anchors)</code></td></tr>
+    <tr><td>算法注册</td><td>必须显式注册，缺一个就“莫名验证失败”：<br><code>br_x509_minimal_set_hash(&amp;xc, br_sha256_ID, &amp;br_sha256_vtable)</code>（同样注册 sha384、sha512、sha1）<br><code>br_x509_minimal_set_rsa(&amp;xc, br_rsa_i31_pkcs1_vrfy)</code><br><code>br_x509_minimal_set_ecdsa(&amp;xc, br_ec_get_default(), br_ecdsa_i31_vrfy_asn1)</code></td></tr>
+    <tr><td>信任锚</td><td><code>br_x509_minimal_set_trust_anchors(&amp;xc, ta, n)</code>，来自 §09</td></tr>
+    <tr><td>时间</td><td><code>br_x509_minimal_set_time(&amp;xc, days, seconds)</code>，由 <code>time(NULL)</code> 换算（自 1970 起的 UTC 天数 + 当日秒数）</td></tr>
+    <tr><td>buffer</td><td><code>br_ssl_engine_set_buffer(&amp;sc.eng, iobuf, sizeof iobuf, 1)</code>，<code>iobuf</code> ≥ 16 KiB（收发各半）</td></tr>
+    <tr><td>SNI</td><td><code>br_ssl_client_set_single_rsa</code> 不适用；<strong>必须</strong>用 <code>br_ssl_client_reset(&amp;sc, "api.cloudflare.com", 0)</code> 传 hostname（同时用于证书名匹配）</td></tr>
+    <tr><td>I/O 模型</td><td>M1 用<strong>阻塞 socket</strong> + <code>br_sslio</code> + <code>SO_RCVTIMEO/SO_SNDTIMEO</code>。理由见下方 callout。M2 可选改为非阻塞 <code>poll</code> 驱动引擎</td></tr>
+    <tr><td>对称加密</td><td><code>br_ssl_engine_set_default_aes_gcm</code> / <code>..._chacha20_poly1305</code>（<code>init_full</code> 已含，勿遗漏完整 profile）</td></tr>
+  </table>
+  <div class="callout tip">
+    <b class="t">为什么阻塞 socket 在这个架构里是可接受的</b>
+    <p>单线程下 TLS 阻塞期间 netlink 事件会在内核 socket 队列里排队，不会丢失；一次请求上限 <code>http_timeout_ms</code>（默认 8 s），而我们每几小时才真正发一次写请求。用阻塞 + <code>SO_RCVTIMEO</code> 能把 BearSSL 的状态机代码量减半，是明确的工程取舍。<strong>若后续需要严格不阻塞，只需替换 <code>tls_http</code> 内部的 I/O 泵，接口不变。</strong></p>
+  </div>
+
+  <h3>08.2 请求构造</h3>
+<pre><code>POST /client/v4/zones/{zone}/dns_records/{id} HTTP/1.1\r\n
+Host: api.cloudflare.com\r\n
+User-Agent: miniddns/1.0.0\r\n
+Accept: application/json\r\n
+Content-Type: application/json\r\n
+Content-Length: {len}\r\n
+Connection: close\r\n
+\r\n
+{body}</code></pre>
+  <ul>
+    <li><strong>必须</strong> <code>Connection: close</code> → 可以“读到 EOF”作为响应结束，无需实现 chunked</li>
+    <li>请求路径只接受静态前缀 + 已校验片段；<code>name</code>/<code>zone_id</code> 在配置校验阶段已限制字符集，<strong>不需要</strong> URL 转义逻辑（但仍要做一次断言）</li>
+    <li>body 用定长 buffer 拼接 <code>snprintf</code>；<code>Content-Length</code> 由 <code>strlen</code> 得出</li>
+  </ul>
+
+  <h3>08.3 响应处理与限额</h3>
+  <table>
+    <tr><th style="width:190px">项</th><th>规格</th></tr>
+    <tr><td>状态行</td><td>解析 <code>HTTP/1.x NNN</code>；非 1.x 拒绝</td></tr>
+    <tr><td>头部上限</td><td>16 KiB，超出 → <code>E_PARSE</code></td></tr>
+    <tr><td>body 上限</td><td>256 KiB，超出 → 截断并标记 <code>E_PARSE</code>（不 OOM）</td></tr>
+    <tr><td>需要解析的头部</td><td><code>Content-Length</code>（可选）<code>Retry-After</code>、<code>Content-Type</code>（仅校验含 <code>json</code>）</td></tr>
+    <tr><td>结束条件</td><td>有 <code>Content-Length</code> 则读满；否则读到 EOF</td></tr>
+    <tr><td>重定向</td><td><strong>provider 请求：不跟随</strong>（3xx → 视为错误）。<strong>IPv4 echo 请求：最多 3 跳</strong>，只允许 https 且 host 在同一白名单内</td></tr>
+  </table>
+
+  <h3>08.4 错误分类（决定退避与日志级别）</h3>
+  <table>
+    <tr><th style="width:150px">code</th><th style="width:210px">触发条件</th><th>日志级别 / 退避</th></tr>
+    <tr><td><code>E_DNS</code></td><td><code>getaddrinfo</code> 失败（<code>EAI_AGAIN</code> 等）</td><td>warn / 正常退避</td></tr>
+    <tr><td><code>E_CONNECT</code></td><td>连接被拒/超时</td><td>warn / 正常退避</td></tr>
+    <tr><td><code>E_TLS_HANDSHAKE</code></td><td>握手失败（非证书类）</td><td>warn / 正常退避</td></tr>
+    <tr><td><code>E_TLS_CERT</code></td><td><code>br_ssl_engine_last_error()</code> 中 x509 验证失败类</td><td><strong>error</strong> / 最大退避</td></tr>
+    <tr><td><code>E_TLS_TIME</code></td><td>证书 notBefore/notAfter 与系统时间冲突</td><td>warn（时钟未同步时）/ 30 s 固定重试</td></tr>
+    <tr><td><code>E_HTTP_STATUS</code></td><td>4xx/5xx</td><td>4xx: error / 5xx: warn；触发退避</td></tr>
+    <tr><td><code>E_RATELIMIT</code></td><td>429</td><td>warn / 用 <code>Retry-After</code></td></tr>
+    <tr><td><code>E_PARSE</code></td><td>HTTP/JSON 解析失败</td><td>error / 最大退避</td></tr>
+    <tr><td><code>E_API</code></td><td>2xx 但 <code>success=false</code></td><td>error / 视 <code>api_code</code> 判定，默认最大退避</td></tr>
+    <tr><td><code>E_TIMEOUT</code></td><td>超过 <code>http_timeout_ms</code></td><td>warn / 正常退避</td></tr>
+  </table>
+  <div class="callout danger">
+    <b class="t">禁止的降级路径</b>
+    <p>任何 CA/证书错误都<strong>不得</strong>退回不验证（不存在 <code>br_x509_insecure</code> 调用点）、不得关闭 hostname 校验、不得改用 http。请求头里带 token，一次未验证的连接等于一次凭据泄露。此约束需在代码中用“不提供该 API”来保证：<code>ca.c</code>/<code>tls_http.c</code> 不导出任何可禁用校验的接口。</p>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s9">
+  <h2><span class="num">09</span>CA 加载器</h2>
+  <p class="lead">运行期解析 PEM bundle 为 <code>br_x509_trust_anchor[]</code>，支持 mtime 触发的重载与到期告警。</p>
+
+  <h3>09.1 解析管线</h3>
+<pre><code>read bundle (≤2 MiB, 整文件读入)
+  └─ br_pem_decoder_init(dest_cb)
+     br_pem_decoder_push(buf, len) 逐块喂入
+     dest_cb 收到 "BEGIN CERTIFICATE"/"END CERTIFICATE" 边界
+     └─ 累积 base64 → DER 缓冲区（每张证书独立）
+        └─ br_x509_decoder_init(append_dn)
+           br_x509_decoder_push(der, der_len)
+           if (br_x509_decoder_last_error(&amp;xc) != 0) → 记录“第 N 张证书解析失败”并跳过
+           else:
+             br_x509_pkey *pk = br_x509_decoder_get_pkey(&amp;xc)
+             深拷贝 DN 到 arena
+             深拷贝 pk-&gt;key.rsa.{n,e}  或  pk-&gt;key.ec.{curve, point}
+             ta[i].flags = BR_X509_TA_CA
+             记录 xc.notafter_days / notafter_seconds
+           ← DER 缓冲区此时可以释放</code></pre>
+
+  <h3>09.2 内存所有权（最容易写错的地方）</h3>
+  <table>
+    <tr><th style="width:200px">对象</th><th>归属</th></tr>
+    <tr><td>PEM 文件内容</td><td>本模块 <code>malloc</code> 一次，解析完立即 <code>free</code></td></tr>
+    <tr><td>单张 DER</td><td>本模块临时 buffer，**必须存活到 <code>get_pkey</code> 完成后**（<code>br_ber_decoder</code> 内部持有输入指针）</td></tr>
+    <tr><td>DN / RSA n,e / EC point</td><td><strong>必须深拷贝</strong>到本模块持有的 arena；<code>get_pkey</code> 返回的指针指向 DER，DER 释放后即悬空</td></tr>
+    <tr><td><code>br_x509_trust_anchor[]</code></td><td>arena 的一部分；<code>ca_reload()</code> 时整块替换</td></tr>
+  </table>
+  <div class="callout warn">
+    <b class="t">不要保留全部 DER</b>
+    <p>整包约 200 KB / ~140 张，逐张解析后只留压缩后的公钥（RSA 2048 模数 256 B、EC 根仅 65 B），锚点集合约 <strong>20–50 KB</strong>。保留 DER 会让常驻内存多出 200 KB，等于白吃 10% 的内存预算。</p>
+  </div>
+
+  <h3>09.3 arena 设计</h3>
+  <ul>
+    <li>一次 <code>malloc</code> 一个大块（初值 64 KiB，不足则按 1.5× 扩容并 <code>realloc</code>），内部用 offset 指针</li>
+    <li>重载时<strong>新旧并存</strong>：先构建新 arena，成功后原子替换指针，最后释放旧 arena（避免重载失败后无 CA 可用）</li>
+    <li>锚点数量上限 512（防御性）</li>
+  </ul>
+
+  <h3>09.4 mtime 重载</h3>
+  <ul>
+    <li>每次发起 HTTPS 请求<strong>之前</strong> <code>stat()</code> CA 文件，比较 <code>(st_mtime, st_size, st_ino)</code></li>
+    <li>变化 → 重载；重载失败 → <strong>保留旧锚点</strong>并 log error（切换发行版、文件被替换成坏文件时不能自杀）</li>
+    <li>重载发生在“下一个请求前”这个天然安全点，不需要锁；<code>struct mn_tls</code> 每次请求都从 <code>ca_current()</code> 取锚点</li>
+  </ul>
+
+  <h3>09.5 到期告警</h3>
+  <ul>
+    <li>解析时记录每张证书的 <code>notafter</code>（<code>br_x509_decoder_context</code> 的公开字段）</li>
+    <li>启动日志固定打印：<code>ca: loaded N anchors from PATH earliest_notAfter=YYYY-MM-DD source=bundled|system</code></li>
+    <li>最早到期 &lt; 90 天 → log <strong>warn</strong>：<code>ca: anchor subject="CN=..." expires in D days (YYYY-MM-DD) — refresh ca/ bundle</code></li>
+    <li>已过期锚点 → log error 并<strong>仍然加载</strong>（可能链上用的是别的锚点）</li>
+  </ul>
+
+  <h3>09.6 <code>--check-ca</code> 自检</h3>
+  <p>只做 TLS 握手，<strong>不发送任何带 token 的请求</strong>：</p>
+  <ol>
+    <li>按配置加载 CA，打印路径/锚点数/最早到期</li>
+    <li>对每个 provider 端点的 host 建 TCP + 完整 TLS 握手（含证书链验证 + 主机名校验）</li>
+    <li>对每个 <code>ipv4_echo_url</code> 的 host 同样握手</li>
+    <li>握手完成后立即关闭连接，不写任何字节</li>
+    <li>输出 <code>check-ca: OK tls=1.2 cipher=ECDHE_RSA_AES128_GCM host=api.cloudflare.com</code> 或失败原因</li>
+    <li>退出码：全部成功 0，任一失败 1</li>
+  </ol>
+  <p>用途：打包验收、systemd <code>ExecStartPre=</code>（可选）、OpenWrt 包 postinst。这是防止“内置 CA 快照两年后静默失效”的唯一机制，<strong>必须实现</strong>。</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="s10">
+  <h2><span class="num">10</span>日志规范</h2>
+  <p class="lead">面向 journald 和 <code>grep</code>，不是面向人眼阅读。单行、无颜色、key=value。</p>
+
+  <h3>10.1 格式</h3>
+<pre><code>&lt;level&gt; miniddns: &lt;message&gt; key=value key=value ...</code></pre>
+  <ul>
+    <li><code>level</code> ∈ <code>error|warn|info|debug</code>，小写，固定宽度不必对齐</li>
+    <li>值含空格或特殊字符时用双引号包裹；否则裸写</li>
+    <li><strong>严禁多行日志</strong>（journald 会拆成多条，破坏结构化）</li>
+    <li><strong>严禁</strong>输出 token、<code>Authorization</code>、完整响应体</li>
+  </ul>
+
+  <h3>10.2 必须存在的日志行</h3>
+  <table>
+    <tr><th style="width:120px">时机</th><th>示例</th></tr>
+    <tr><td>启动</td><td><code>info miniddns: start version=1.0.0 instance=home config=/etc/miniddns/miniddns.conf</code></td></tr>
+    <tr><td>CA</td><td><code>info miniddns: ca loaded anchors=141 path=/opt/miniddns/ca/ca-certificates.crt earliest_notAfter=2027-04-15 source=bundled</code></td></tr>
+    <tr><td>netlink</td><td><code>info miniddns: netlink subscribed groups=ipv4_ifaddr,ipv6_ifaddr,link initial_addrs=3</code></td></tr>
+    <tr><td>事件</td><td><code>debug miniddns: addr event family=inet6 action=add iface=eth0 addr=2402:...</code></td></tr>
+    <tr><td>cycle</td><td><code>info miniddns: cycle start reason=event pending_addrs=1</code></td></tr>
+    <tr><td>探测结果</td><td><code>info miniddns: detect family=inet6 source=iface ip=2402:... candidates=2</code></td></tr>
+    <tr><td>跳过</td><td><code>info miniddns: record name=home.example.com type=AAAA action=skip reason=no-publishable-ipv6 candidates=2 temporary=1 dadfailed=1</code></td></tr>
+    <tr><td>未变化</td><td><code>info miniddns: record name=home.example.com type=A action=unchanged ip=203.0.113.7</code></td></tr>
+    <tr><td>更新</td><td><code>info miniddns: record name=home.example.com type=AAAA action=update old=2402:...a new=2402:...b provider=cloudflare duration_ms=214</code></td></tr>
+    <tr><td>创建</td><td><code>info miniddns: record name=... type=A action=create ip=... id=372e... duration_ms=230</code></td></tr>
+    <tr><td>错误</td><td><code>error miniddns: record name=... type=A action=error err=E_API api_code=9109 api_msg="Invalid access token"</code></td></tr>
+    <tr><td>cycle 结束</td><td><code>info miniddns: cycle end ok=1 fail=0 duration_ms=241 next=event</code></td></tr>
+    <tr><td>CA 告警</td><td><code>warn miniddns: ca anchor_expiry_days=45 subject="CN=Example Root CA" expires=2026-01-02</code></td></tr>
+    <tr><td>ENOBUFS</td><td><code>warn miniddns: netlink overflow resync=full_dump</code></td></tr>
+    <tr><td>时钟</td><td><code>warn miniddns: clock_unsynced epoch=1200 retry_in=30s</code></td></tr>
+  </table>
+
+  <h3>10.3 噪声控制</h3>
+  <ul>
+    <li>稳态（IP 不变）下每 <code>interval_fallback</code> 只产生 <strong>2 行</strong> info（cycle start / cycle end）—— 900 s 一次，可接受</li>
+    <li>同一错误连续出现时，<code>info</code> 级每 10 次折叠为 1 行 <code>repeat=10</code>；<code>error</code> 级不折叠</li>
+    <li><code>debug</code> 级下才输出逐事件日志与 HTTP 头部（<strong>头部中 <code>Authorization</code> 必须打码为 <code>Bearer ****</code></strong>）</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="s11">
+  <h2><span class="num">11</span>命令行接口</h2>
+  <table>
+    <tr><th style="width:210px">选项</th><th>行为</th></tr>
+    <tr><td><code>-c, --config PATH</code></td><td>指定配置文件；不存在即报错</td></tr>
+    <tr><td><code>-f, --foreground</code></td><td>前台运行（默认行为；存在的意义是显式声明，供 systemd 使用）</td></tr>
+    <tr><td><code>-1, --once</code></td><td>执行一次完整 cycle 后退出。退出码：0 全部成功/未变化，1 有失败</td></tr>
+    <tr><td><code>-n, --dry-run</code></td><td>与 <code>--once</code> 类似，但<strong>不执行 update/create</strong>；discover 仍执行。日志中 action 变为 <code>would-update</code></td></tr>
+    <tr><td><code>--print-ip</code></td><td>只做 IP 探测并打印 <code>ipv4=... ipv6=...</code>（或 <code>ipv4=none</code>），不访问 provider，不加载 token</td></tr>
+    <tr><td><code>--check-config</code></td><td>解析 + 校验配置，打印规范化结果（token 打码），退出</td></tr>
+    <tr><td><code>--check-ca</code></td><td>CA 加载 + 端点 TLS 握手自检（§09.6）</td></tr>
+    <tr><td><code>-l, --log-level L</code></td><td>覆盖配置中的 <code>log_level</code></td></tr>
+    <tr><td><code>-v, --version</code></td><td>打印版本 + 编译信息（BearSSL 版本、jsmn、是否静态）</td></tr>
+    <tr><td><code>-h, --help</code></td><td>用法</td></tr>
+    <tr><td><code>--allow-non-root-owner</code></td><td>跳过“文件属主必须是 root”的检查（仅测试用）</td></tr>
+  </table>
+  <p>默认（无参数）行为：以前台守护方式运行完整事件循环。所有诊断子命令都<strong>不</strong>获取 flock（可与运行中的实例共存）。</p>
+</section>
+
+<!-- ============================================================ -->
+<section id="s12">
+  <h2><span class="num">12</span>systemd 集成</h2>
+  <p class="lead">常驻 <code>Type=simple</code>，不用 timer。加固项里有两处会直接打死 netlink，必须注意。</p>
+
+  <h3>12.1 服务单元（单元模板）</h3>
+  <p>源码位置 <code>systemd/miniddns.service.in</code>，三个占位符在安装时替换。构建产物中同时提供已替换好的 <code>systemd/miniddns.service</code> 供直接 <code>cp</code> 使用。</p>
+<pre><code># systemd/miniddns.service.in  —— 安装后为 /etc/systemd/system/miniddns.service
+# 占位符：@BINDIR@ @CONFDIR@ @DOCDIR@
+[Unit]
+Description=miniddns dynamic DNS updater
+Documentation=file:@DOCDIR@/design.html
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/miniddns --foreground
+
+# 可选：启动前做一次 CA/连通性自检（失败则不启动）
+# ExecStartPre=@BINDIR@/miniddns --check-ca
+
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=10s
+
+# 凭据：token 只出现在内存 tmpfs，不落盘、不进 Environment
+LoadCredential=cloudflare.token:@CONFDIR@/cloudflare.token
+
+# --- 加固 ---
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# 必须包含 AF_NETLINK，否则 socket() 直接 EAFNOSUPPORT
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+
+RuntimeDirectory=miniddns
+RuntimeDirectoryMode=0750
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+
+  <div class="callout danger">
+    <b class="t">两个绝不能加的项</b>
+    <ul style="margin:6px 0">
+      <li><code>PrivateNetwork=yes</code> —— 会新建 network namespace，里面没有任何接口，<strong>永远收不到 rtnetlink 事件</strong></li>
+      <li><code>IPAddressDeny=any</code> / <code>IPAddressAllow=</code> 白名单 —— 用 cgroup BPF 过滤 socket 流量，会误伤 netlink/CONNECT 语义，不要引入</li>
+    </ul>
+    <p>另外 <code>RestrictAddressFamilies</code> 里<strong>漏掉 <code>AF_NETLINK</code> 是本项目最容易踩的加固坑</strong>，症状是“进程启动即退出，日志只有 socket: Address family not supported”。</p>
+  </div>
+
+  <h3>12.2 安装位置与可迁移性</h3>
+  <p>程序用 <code>/proc/self/exe</code> 定位 artifact root（§03），所以单元的 <code>ExecStart</code> 必须指向真实二进制路径。两种方案，<strong>默认采用 A</strong>：</p>
+
+  <h4>方案 A（推荐）：稳定符号链接 + 版本化目录</h4>
+<pre><code>/opt/miniddns-1.1.0/{bin,conf,ca,doc}   # 版本化真实目录
+/opt/miniddns -> miniddns-1.1.0          # 当前版本符号链接
+/usr/local/bin/miniddns -> /opt/miniddns/bin/miniddns
+
+# 单元里永远写这一行，升级/回滚都不改单元：
+ExecStart=/usr/local/bin/miniddns --foreground</code></pre>
+  <ul>
+    <li><code>/proc/self/exe</code> 会解析符号链接，得到 <code>/opt/miniddns-1.1.0/bin/miniddns</code>，root 定位依然正确</li>
+    <li>升级 = 解包新版本目录 + 改一个软链 + <code>systemctl restart</code>；回滚同理</li>
+    <li>此时单元的 <code>ExecStart</code> 与 <code>PREFIX</code> 解耦，<strong>可以用 <code>@BINDIR@</code> 固定替换为 <code>/usr/local/bin</code></strong></li>
+  </ul>
+
+  <h4>方案 B：绝对前缀（单目录安装）</h4>
+<pre><code>/opt/miniddns/{bin,conf,ca,doc}
+ExecStart=/opt/miniddns/bin/miniddns --foreground</code></pre>
+  <p>简单直接，但<strong>移动目录后必须重新生成单元</strong>。两种方案都已被 <code>install.sh --prefix ... --link-bin</code> 覆盖。</p>
+
+  <h3>12.3 单元文件的随包分发与安装</h3>
+  <table>
+    <tr><th style="width:300px">产物中的路径</th><th>用途</th></tr>
+    <tr><td><code>systemd/miniddns.service.in</code></td><td>模板，含 <code>@BINDIR@</code> <code>@CONFDIR@</code> <code>@DOCDIR@</code></td></tr>
+    <tr><td><code>systemd/miniddns.service</code></td><td>已按默认 <code>PREFIX=/opt/miniddns</code> 替换好的成品，可 <code>cp</code> 到 <code>/etc/systemd/system/</code></td></tr>
+    <tr><td><code>install.sh</code></td><td>安装二进制/配置/CA/文档 + 生成并安装单元 + <code>daemon-reload</code></td></tr>
+  </table>
+<pre><code># 方式 1：install.sh（推荐）
+sudo ./install.sh --prefix /opt/miniddns --link-bin
+
+# 方式 2：手工（默认前缀）
+sudo install -Dm0755 bin/miniddns    /opt/miniddns/bin/miniddns
+sudo install -Dm0644 ca/ca-certificates.crt /opt/miniddns/ca/ca-certificates.crt
+sudo install -Dm0644 systemd/miniddns.service /etc/systemd/system/miniddns.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now miniddns</code></pre>
+  <div class="callout warn">
+    <b class="t">install.sh 的三条硬要求</b>
+    <ol style="margin:6px 0">
+      <li><strong>不自带 <code>conf/miniddns.conf</code></strong>：只安装 <code>conf/miniddns.conf.example</code>；若目标已存在配置文件，<strong>绝不覆盖</strong></li>
+      <li><strong>不覆盖已有 token</strong>；<code>--prefix</code> 与 <code>--link-bin</code> 之外不提供任何会改动 <code>/etc/miniddns/</code> 的选项</li>
+      <li>安装完成后打印下一步命令，<strong>不自动 <code>enable --now</code></strong>（配置还没填，自动启动只会刷错误日志）</li>
+    </ol>
+  </div>
+
+  <h3>12.4 关于运行用户</h3>
+  <p>默认以 root 运行 + <code>CapabilityBoundingSet=</code>（空）。此时进程实际无任何 capability，等效非特权，但保留了读 0600 token 文件的能力。若希望彻底非 root，单元中改用：</p>
+<pre><code>User=miniddns
+Group=miniddns
+# token 文件改为 0640 root:miniddns，并按需去掉 LoadCredential</code></pre>
+  <p>此处提供 <code>systemd/miniddns@user.service.d/override.conf</code> 片段，供 <code>systemctl edit</code> 直接引用，避免手写出错。</p>
+
+  <h3>12.5 不需要 timer 单元</h3>
+  <p>兜底周期由进程内 <code>timerfd</code> 实现（<code>interval_fallback</code>），不需要 <code>.timer</code>。好处：boot 后的首次同步与事件合并逻辑只有一处代码、不依赖 systemd 的 timer 语义、也不会出现“service 正在跑而 timer 又拉起一次”。</p>
+
+  <h3>12.6 OpenWrt：没有 systemd</h3>
+  <p>OpenWrt 使用 procd。产物中额外提供 <code>openwrt/files/miniddns.init</code>，并在 §13.3 的 dist 布局中包含它。要点：</p>
+  <ul>
+    <li><code>procd_set_param respawn 3600 5 5</code>，<code>procd_set_param command /usr/bin/miniddns --foreground</code></li>
+    <li><code>procd_set_param limits core="0 0"</code>；<strong>不需要</strong> _capabilities 参数</li>
+    <li><code>START=99</code>（等 <code>sysntpd</code> 起来），<code>USE_PROCD=1</code></li>
+    <li>procd <strong>不提供</strong> systemd 那套 hardening；因此程序内的 fail-closed 校验（§09/§03）是唯一的防线，不可绕过</li>
+  </ul>
+
+  <h3>12.7 运维命令</h3>
+<pre><code>systemctl enable --now miniddns
+journalctl -u miniddns -f
+journalctl -u miniddns -g 'action=update'          # 只看真正的更新
+journalctl -u miniddns -g 'action=error'
+systemctl show -p CPUUsageNSec -p MemoryPeak miniddns   # 资源验收（§14.6）</code></pre>
+</section>
+
+<!-- ============================================================ -->
+<section id="s13">
+  <h2><span class="num">13</span>构建与打包</h2>
+
+  <h3>13.1 编译选项 <span class="tag must">强制</span></h3>
+<pre><code>CC      ?= cc
+CSTD    ?= -std=c99
+WARN    ?= -Wall -Wextra -Wno-unused-parameter
+HARDEN  ?= -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -fno-plt
+OPT     ?= -O2
+LDFLAGS += -pie -Wl,-z,relro,-z,now
+INC     := -Ithird_party/bearssl/inc -Ithird_party/jsmn -Isrc
+
+BEARSSL_SRC := $(shell find third_party/bearssl/src -name '*.c')
+SRC         := $(wildcard src/*.c)
+OBJ         := $(SRC:%.c=build/%.o) $(BEARSSL_SRC:%.c=build/%.o)
+
+build/miniddns: $(OBJ)
+	$(CC) $(OBJ) $(LDFLAGS) -o $@
+
+# 静态产物（musl，OpenWrt/嵌入式）
+static:
+	$(MAKE) CC=musl-gcc LDFLAGS="-static -s" build/miniddns
+
+# ---- 单元文件生成与安装 ----
+PREFIX   ?= /opt/miniddns
+BINDIR   ?= $(PREFIX)/bin
+CONFDIR  ?= /etc/miniddns
+DOCDIR   ?= $(PREFIX)/doc
+SYSTEMD  ?= /etc/systemd/system
+
+build/miniddns.service: systemd/miniddns.service.in
+	sed -e 's|@BINDIR@|$(BINDIR)|g'      \
+	    -e 's|@CONFDIR@|$(CONFDIR)|g'    \
+	    -e 's|@DOCDIR@|$(DOCDIR)|g'      \
+	    $&lt; &gt; $@
+
+install: build/miniddns build/miniddns.service
+	install -Dm0755 build/miniddns             $(DESTDIR)$(BINDIR)/miniddns
+	install -Dm0644 ca/ca-certificates.crt     $(DESTDIR)$(PREFIX)/ca/ca-certificates.crt
+	install -Dm0644 conf/miniddns.conf.example $(DESTDIR)$(PREFIX)/conf/miniddns.conf.example
+	install -Dm0644 doc/design.html            $(DESTDIR)$(DOCDIR)/design.html
+	install -Dm0644 build/miniddns.service     $(DESTDIR)$(SYSTEMD)/miniddns.service
+	@echo "next: systemctl daemon-reload &amp;&amp; systemctl enable --now miniddns"</code></pre>
+  <div class="callout warn">
+    <b class="t">单元文件必须参与构建依赖</b>
+    <p><code>install</code> 目标依赖 <code>build/miniddns.service</code>（由 <code>.in</code> 生成），而不是直接 <code>cp</code> 模板。否则改一处 <code>ExecStart</code> 就会引来“手改单元 vs 手改模板”的不一致。同理，<code>make dist</code> 前必须重新生成一次。</p>
+  </div>
+  <ul>
+    <li>BearSSL 配置宏：<code>-DBR_USE_URANDOM</code>（Linux）；如需裁剪可加 <code>-DBR_SSL_CLI_C</code> 专用 profile 但<strong>v1 不做算法裁剪</strong>（收益小、风险大）</li>
+    <li>禁止 <code>-DBR_USE_WIN32_RAND</code> 等平台宏混入</li>
+  </ul>
+
+  <h3>13.2 体积预算</h3>
+  <table>
+    <tr><th>组成</th><th>估算</th></tr>
+    <tr><td>业务代码</td><td>60–90 KB</td></tr>
+    <tr><td>BearSSL（全 profile）</td><td>120–200 KB</td></tr>
+    <tr><td>jsmn</td><td>≈ 5 KB</td></tr>
+    <tr><td><strong>静态产物合计</strong></td><td><strong>250–400 KB</strong>（<code>-s</code> 后）</td></tr>
+    <tr><td>CA 快照</td><td>~200 KB</td></tr>
+  </table>
+
+  <h3>13.3 <code>make dist</code></h3>
+<pre><code>dist/miniddns-$(VERSION)-$(ARCH)-musl/
+├── bin/miniddns
+├── conf/miniddns.conf.example     # 由 conf/miniddns.conf.example 复制（不是 .conf）
+├── ca/ca-certificates.crt         # 从构建机 /etc/ssl/certs/ca-certificates.crt 复制
+├── ca/README                      # 快照 UTC 日期 + sha256 + 来源发行版
+├── systemd/
+│   ├── miniddns.service           # 已按默认 PREFIX=/opt/miniddns 生成，可直接 cp
+│   └── miniddns.service.in        # 模板，供自定义 PREFIX
+├── openwrt/files/miniddns.init     # procd（OpenWrt）
+├── doc/design.html
+├── install.sh
+└── SHA256SUMS</code></pre>
+  <p><code>make dist</code> 的完整步骤（顺序不可颠倒）：</p>
+  <ol>
+    <li><code>$(MAKE) static</code> → <code>bin/miniddns</code></li>
+    <li><code>$(MAKE) build/miniddns.service PREFIX=/opt/miniddns</code> → 成品单元</li>
+    <li>复制 <code>systemd/</code>（<code>.service</code> + <code>.service.in</code>）、<code>openwrt/</code>、<code>conf/*.example</code>、<code>doc/</code>、<code>install.sh</code></li>
+    <li><code>make ca-refresh</code> → <code>ca/ca-certificates.crt</code> + <code>ca/README</code>（含 sha256）</li>
+    <li><code>sha256sum</code> 全树 → <code>SHA256SUMS</code>；<strong>不得包含</strong> <code>conf/miniddns.conf</code> 或任何 token 文件</li>
+  </ol>
+  <div class="callout danger">
+    <b class="t">dist 包内禁止出现的文件</b>
+    <p><code>conf/miniddns.conf</code>（会遮蔽用户的 <code>/etc</code> 配置，见 §03）、任何 <code>*.token</code>、<code>build/</code> 中间产物、<code>.git/</code>。建议在 dist 目标末尾加一条断言：<code>! find $(DIST) \( -name '*.token' -o -name 'miniddns.conf' \) | grep .</code></p>
+  </div>
+  <p><code>ca/README</code> 内容模板：</p>
+<pre><code>CA bundle snapshot
+==================
+taken_at      : 2025-01-01T00:00:00Z
+source        : Debian 13 /etc/ssl/certs/ca-certificates.crt
+certificates  : 141
+sha256        : &lt;hash&gt;
+
+refresh with: make ca-refresh
+verify with : miniddns --check-ca
+This bundle is a FALLBACK. Prefer the system store when available.</code></pre>
+
+  <h3>13.4 交叉编译</h3>
+  <table>
+    <tr><th style="width:150px">目标</th><th>要点</th></tr>
+    <tr><td>Debian/Ubuntu</td><td>直接 <code>cc</code> 动态链接 glibc 即可</td></tr>
+    <tr><td>Alpine / 静态</td><td><code>musl-gcc -static</code>；产物 <code>ldd</code> 输出 "not a dynamic executable"</td></tr>
+    <tr><td>OpenWrt</td><td>用 SDK 的 <code>staging_dir/toolchain-*/bin/*-openwrt-linux-musl-gcc</code>，<code>-static</code>；不要链接 alert 依赖的 <code>libustream</code></td></tr>
+    <tr><td>ARMv7/AArch64</td><td>同上，注意 BearSSL 的 <code>BR_ARMEL_CORTEXM_GCC</code> 等宏<strong>不要</strong>误加（那些是裸机互斥的）</td></tr>
+  </table>
+</section>
+
+<!-- ============================================================ -->
+<section id="s14">
+  <h2><span class="num">14</span>测试与验收</h2>
+  <p class="lead">没有以下测试通过，不得标记任务完成。</p>
+
+  <h3>14.1 单元测试（<code>make test</code>）</h3>
+  <table>
+    <tr><th style="width:200px">目标</th><th>用例要点</th></tr>
+    <tr><td><code>cfg</code></td><td>正常解析；未知 key 报错带行号；重复 <code>[record]</code> 合法；重复 <code>(provider,name,type)</code> 报错；值含空格/无引号；行首注释；大小写 key</td></tr>
+    <tr><td><code>ipv4_classify</code></td><td>§06.1 每个前缀各一例（含边界 172.15/172.32、100.63/100.128）</td></tr>
+    <tr><td><code>ipv6_norm</code></td><td><code>::</code>、<code>::1</code>、完整 8 组、混合大小写、带 zone id 的样本；断言 <code>2001:db8::1</code> == <code>2001:0db8:0000:0000:0000:0000:0000:0001</code></td></tr>
+    <tr><td><code>ipv6_filter</code></td><td>构造 <code>ifaddrmsg</code>+<code>IFA_FLAGS</code> 二进制样本：temporary / deprecated / tentative / dadfailed / valid_lft=0 各一例必须被剔除</td></tr>
+    <tr><td><code>http_parse</code></td><td>200 带 Content-Length；200 无 Content-Length（读到 EOF）；分块到达的响应；头超限；body 超限；<code>Retry-After</code> 秒与 HTTP-date 两种</td></tr>
+    <tr><td><code>ca_load</code></td><td>tests/fixtures 里的 3 张 PEM：正常加载；坏 base64 跳过并计数；空文件报错；非 PEM 报错</td></tr>
+    <tr><td><code>json_util</code></td><td>取 <code>result[0].id</code>；取 <code>errors[0].message</code>；缺字段；<code>success=false</code></td></tr>
+    <tr><td><code>backoff</code></td><td>序列推进与上限；成功重置；<code>Retry-After</code> 覆盖</td></tr>
+  </table>
+
+  <h3>14.2 集成测试（需网络或本地 mock）</h3>
+  <ul class="chk">
+    <li><code>--print-ip</code> 在本机输出正确的 IPv6（与 <code>ip -6 addr</code> 结果人工比对）</li>
+    <li><code>--check-config</code> 对仓库内 example 文件通过，且 token 字段被打码</li>
+    <li><code>--check-ca</code> 对 <code>api.cloudflare.com</code> 握手成功；故意把 <code>ca_bundle</code> 指向一个空文件时失败且给出 <code>E_TLS_CERT</code></li>
+    <li>用 Python 起一个**自签名 TLS mock server**（自带 CA），验证：<br>· 信任该 CA 时握手成功<br>· 不信任时返回 <code>E_TLS_CERT</code> 且<strong>不发送任何请求字节</strong>（用 server 端计数断言）<br>· hostname 不匹配时失败</li>
+    <li>用 mock server 模拟 Cloudflare：<br>· discover 返回 1 条 → 断言只发 PATCH 且 body 仅含 <code>content</code><br>· discover 返回 0 条 → 断言走 POST create，body 含 <code>type/name/content/ttl/proxied</code><br>· 返回 <code>success=false</code> + <code>errors[].code</code> → 断言日志含 <code>api_code</code><br>· 返回 429 + <code>Retry-After: 30</code> → 断言下次尝试在 30 s 后</li>
+    <li><code>record_id</code> 预置时，断言<strong>零次 discover GET</strong>（mock 计数器）</li>
+    <li>IP 未变化时，断言<strong>零次写入请求</strong>（本项目的核心正确性）</li>
+  </ul>
+
+  <h3>14.3 故障注入</h3>
+  <table>
+    <tr><th style="width:230px">注入</th><th>期望行为</th></tr>
+    <tr><td><code>kill -TERM</code></td><td>10 s 内干净退出，退出码 0，无 core</td></tr>
+    <tr><td>DNS 全失败</td><td><code>E_DNS</code> → 退避重试，进程不死</td></tr>
+    <tr><td>拔网线 / <code>ip link set down</code></td><td>收到 <code>RTM_NEWLINK</code>，cycle 记 <code>no-ip</code> 并跳过，<strong>不清除已有 DNS 记录</strong></td></tr>
+    <tr><td>系统时间回退到 1970</td><td>时钟守卫生效，30 s 重试，日志区分 <code>tls_time</code></td></tr>
+    <tr><td>CA 文件被替换成坏内容</td><td>重载失败 → 保留旧锚点 + error 日志，后续请求仍可用旧 CA</td></tr>
+    <tr><td>CA 文件 mtime 变化但内容相同</td><td>重载成功（无害）</td></tr>
+    <tr><td>netlink 队列溢出</td><td>无法直接注入；用单元测试覆盖 <code>ENOBUFS</code> 分支返回值</td></tr>
+    <tr><td>两个实例同时启动</td><td>第二个 flock 失败 → 退出码 0 + info 日志</td></tr>
+    <tr><td>配置文件属主非 root / 可写</td><td>拒绝启动，错误信息明确指出哪个文件哪个原因</td></tr>
+  </table>
+
+  <h3>14.4 soak 测试（24 h）</h3>
+  <ul>
+    <li><code>interval_fallback = 60</code>，mock provider 恒定返回相同 IP</li>
+    <li>断言：写入请求数 = 0；cycle 数 ≈ 1440；无内存增长（RSS 波动 &lt; 64 KB，用 <code>MemoryPeak</code> 对比 <code>MemoryCurrent</code>）</li>
+    <li>期间执行 6 次 <code>ip addr add/del</code> → 断言恰好 6 次写入</li>
+  </ul>
+
+  <h3>14.5 资源验收阈值 <span class="tag must">门禁</span></h3>
+<pre><code>systemctl show -p CPUUsageNSec -p MemoryPeak miniddns</code></pre>
+  <table>
+    <tr><th>指标</th><th>阈值</th></tr>
+    <tr><td>常驻 RSS（<code>MemoryCurrent</code>）</td><td>≤ 2.5 MB</td></tr>
+    <tr><td>峰值（<code>MemoryPeak</code>）</td><td>≤ 6 MB（CA 加载 + TLS 握手瞬时）</td></tr>
+    <tr><td>24 h 累计 CPU（<code>CPUUsageNSec</code>）</td><td>≤ 2 s</td></tr>
+    <tr><td>稳态写入请求</td><td>0 次/24 h（IP 不变时）</td></tr>
+    <tr><td>静态产物</td><td>≤ 500 KB</td></tr>
+  </table>
+
+  <h3>14.6 代码质量门禁</h3>
+  <ul class="chk">
+    <li><code>-Wall -Wextra</code> 零警告</li>
+    <li>ASan/UBSan 构建下通过全部单元测试（<code>make test-asan</code>）</li>
+    <li><code>valgrind --leak-check=full</code> 在 <code>--once</code> 与 <code>--check-ca</code> 路径下零 definite/indirect 泄漏</li>
+    <li>仓库内无 <code>system(</code>/<code>popen(</code>/<code>fork(</code>（本方案不需要）</li>
+    <li>无 <code>strcpy</code>/<code>strcat</code>/<code>sprintf</code>（只用 <code>snprintf</code> 并检查返回值）</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="s15">
+  <h2><span class="num">15</span>实施里程碑</h2>
+  <p class="lead">顺序是刻意的：<strong>先打通风险最高的 TLS/CA</strong>，再写业务逻辑。</p>
+
+  <table>
+    <tr><th style="width:70px">阶段</th><th style="width:230px">交付物</th><th>验收</th></tr>
+    <tr>
+      <td><strong>M0</strong></td>
+      <td>骨架、<code>cfg.c</code>、<code>log.c</code>、Makefile、<code>--check-config</code></td>
+      <td>example 配置能解析；错误配置报行号；单元测试 <code>cfg</code> 全绿</td>
+    </tr>
+    <tr>
+      <td><strong>M1</strong></td>
+      <td><code>ca.c</code> + <code>tls_http.c</code> + <code>--check-ca</code></td>
+      <td>对 <code>api.cloudflare.com</code> 握手成功并打印锚点数/最早到期；空 CA 文件失败且 <code>E_TLS_CERT</code>；valgrind 干净</td>
+    </tr>
+    <tr>
+      <td><strong>M2</strong></td>
+      <td><code>nl_addr.c</code> + <code>detect.c</code> + <code>--print-ip</code></td>
+      <td>与 <code>ip -6 addr</code> 结果一致；temporary/dadfailed 被正确剔除；手工 <code>ip addr add/del</code> 能触发事件</td>
+    </tr>
+    <tr>
+      <td><strong>M3</strong></td>
+      <td><code>provider.c</code> + <code>prov_cloudflare.c</code> + <code>--once</code> / <code>--dry-run</code></td>
+      <td>对接 mock server 全部集成用例通过；IP 未变时零写入</td>
+    </tr>
+    <tr>
+      <td><strong>M4</strong></td>
+      <td>事件循环、debounce、兜底 <code>timerfd</code>、退避、时钟守卫、flock、signalfd</td>
+      <td>soak 24 h 通过 §14.4；断开/恢复网络行为正确</td>
+    </tr>
+    <tr>
+      <td><strong>M5</strong></td>
+      <td>systemd 单元（<code>.in</code> + 成品）、<code>install.sh</code>、<code>make install</code>、procd 脚本、<code>make dist</code>、<code>ca/</code> 快照、文档、OpenWrt 静态产物</td>
+      <td>§14.5 资源门禁通过；<code>ldd</code> 显示静态；装机后 30 分钟内零错误日志</td>
+    </tr>
+  </table>
+
+  <div class="callout tip">
+    <b class="t">给实现者的两条建议</b>
+    <ol style="margin:6px 0">
+      <li><strong>M2 之前不要写 provider 代码</strong>。先用 <code>--print-ip</code> 把地址选择调对（这是最容易出“每天更新 300 次”的地方）。</li>
+      <li><strong>M1 的 <code>--check-ca</code> 是整项目的风险闸门</strong>。它一旦跑通，剩下的都是普通业务代码；它跑不通，你会同时怀疑 CA 解析、TLS 配置、时间和网络——那是最贵的调试状态。</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============================================================ -->
+<section id="s16">
+  <h2><span class="num">16</span>风险与未决问题</h2>
+  <table>
+    <tr><th style="width:210px">风险</th><th style="width:80px">影响</th><th>缓解</th></tr>
+    <tr><td>BearSSL 不支持 TLS 1.3</td><td>低</td><td>CF 同时支持 1.2；且每次新连接都有 ECDHE PFS。若 CF 将来强制 1.3，替换 <code>tls_http.c</code> 内部实现为 mbedTLS（接口不变）</td></tr>
+    <tr><td>BearSSL 无 AIA 抓取</td><td>低</td><td>依赖服务端随握手发送中间证书（公开 CA 均如此）；失败时日志明确为链构建错误</td></tr>
+    <tr><td>BearSSL 上游 2021 后基本冻结</td><td>中</td><td>代码稳定、无 malloc、攻击面小；已把 TLS 隔离在单一模块内，替换成本可控</td></tr>
+    <tr><td>内置 CA 快照过期</td><td>中</td><td><code>notAfter</code> 90 天告警 + <code>--check-ca</code> + <code>ca/README</code> 记录快照日期</td></tr>
+    <tr><td>多网卡/多 IPv6 时选择不符合用户预期</td><td>中</td><td>确定性排序 + <code>iface_include/exclude</code> 手工收敛；<code>--print-ip</code> 可即时验证</td></tr>
+    <tr><td>阻塞式 TLS 期间事件处理延迟</td><td>低</td><td>内核队列缓冲事件；<code>http_timeout_ms</code> 有界；<code>ENOBUFS</code> 触发全量 resync</td></tr>
+    <tr><td>Cloudflare <code>GET /dns_records</code> 秒级缓存导致重复写</td><td>低</td><td>容忍；建议用户填 <code>record_id</code> 跳过 discover</td></tr>
+    <tr><td>私有 IPv4 被 API 拒绝</td><td>中</td><td>§06.2 在探测层拦截，绝不发出必然失败的请求</td></tr>
+  </table>
+
+  <h3>未决问题（v1 明确不做，记录在此）</h3>
+  <ul>
+    <li>多实例：v1 用 <code>instance</code> + lock 文件支持“多份配置多进程”，但<strong>不</strong>在单进程内跑多套 provider 组（一个进程服务整个配置）</li>
+    <li>Zone 名自动解析为 <code>zone_id</code>：v1 要求显式填写 <code>zone_id</code>（避免额外权限与额外失败模式）。可用 <code>curl</code> 一次性查出后写进配置</li>
+    <li>记录删除/清理（IP 消失时删除 AAAA）：v1 只跳过，不删除。理由是“删除”破坏性太强，且 IPv6 地址消失多数是瞬态</li>
+    <li>IPv6 前缀变化（<code>RTNLGRP_IPV6_PREFIX</code>）：v1 只订阅地址事件，不订阅前缀事件。前缀变化最终会体现为地址变化，延迟可接受。若要做“前缀一变立即动作”，加 <code>RTNLGRP_IPV6_PREFIX</code> 即可（接口已留位）</li>
+  </ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="sa">
+  <h2><span class="num">A</span>附录</h2>
+
+  <h3>A.1 netlink 常量速查</h3>
+  <table>
+    <tr><th style="width:260px">常量</th><th style="width:90px">值</th><th>说明</th></tr>
+    <tr><td><code>NETLINK_ROUTE</code></td><td>0</td><td>rtnetlink</td></tr>
+    <tr><td><code>RTM_NEWADDR</code></td><td>20</td><td>地址新增/变更</td></tr>
+    <tr><td><code>RTM_DELADDR</code></td><td>21</td><td>地址删除</td></tr>
+    <tr><td><code>RTM_GETADDR</code></td><td>22</td><td>查询/全量 dump</td></tr>
+    <tr><td><code>RTM_NEWLINK</code> / <code>RTM_DELLINK</code></td><td>16 / 17</td><td>接口事件</td></tr>
+    <tr><td><code>RTNLGRP_LINK</code></td><td>1</td><td>组播组序号（bind 时用 <code>1 &lt;&lt; (n-1)</code>）</td></tr>
+    <tr><td><code>RTNLGRP_IPV4_IFADDR</code></td><td>5</td><td></td></tr>
+    <tr><td><code>RTNLGRP_IPV6_IFADDR</code></td><td>9</td><td></td></tr>
+    <tr><td><code>RTNLGRP_IPV6_PREFIX</code></td><td>11</td><td>v1 不订阅，接口留位</td></tr>
+    <tr><td><code>IFA_ADDRESS</code> / <code>IFA_LOCAL</code></td><td>1 / 2</td><td>地址属性</td></tr>
+    <tr><td><code>IFA_LABEL</code></td><td>3</td><td>接口名</td></tr>
+    <tr><td><code>IFA_CACHEINFO</code></td><td>6</td><td>valid/preferred lifetime</td></tr>
+    <tr><td><code>IFA_FLAGS</code></td><td>8</td><td>32 位标志（优先于 <code>ifaddrmsg.ifa_flags</code>）</td></tr>
+  </table>
+
+  <h3>A.2 IPv6 地址标志 <code>IFA_F_*</code></h3>
+  <table>
+    <tr><th style="width:260px">标志</th><th style="width:90px">值</th><th>处理</th></tr>
+    <tr><td><code>IFA_F_SECONDARY</code> / <code>IFA_F_TEMPORARY</code></td><td>0x01</td><td><strong>剔除</strong>（隐私扩展）</td></tr>
+    <tr><td><code>IFA_F_NODAD</code></td><td>0x02</td><td>忽略</td></tr>
+    <tr><td><code>IFA_F_OPTIMISTIC</code></td><td>0x04</td><td><strong>剔除</strong></td></tr>
+    <tr><td><code>IFA_F_DADFAILED</code></td><td>0x08</td><td><strong>剔除</strong></td></tr>
+    <tr><td><code>IFA_F_HOMEADDRESS</code></td><td>0x10</td><td>忽略</td></tr>
+    <tr><td><code>IFA_F_DEPRECATED</code></td><td>0x20</td><td><strong>剔除</strong></td></tr>
+    <tr><td><code>IFA_F_TENTATIVE</code></td><td>0x40</td><td><strong>剔除</strong></td></tr>
+    <tr><td><code>IFA_F_PERMANENT</code></td><td>0x80</td><td>忽略</td></tr>
+    <tr><td><code>IFA_F_MANAGETEMPADDR</code></td><td>0x100</td><td>忽略（稳定地址标志，可发布）</td></tr>
+    <tr><td><code>IFA_F_NOPREFIXROUTE</code></td><td>0x200</td><td>忽略</td></tr>
+  </table>
+
+  <h3>A.3 内部错误码</h3>
+  <table>
+    <tr><th style="width:180px">常量</th><th>含义</th></tr>
+    <tr><td><code>MN_OK</code></td><td>成功</td></tr>
+    <tr><td><code>E_CFG</code></td><td>配置错误</td></tr>
+    <tr><td><code>E_DNS</code> <code>E_CONNECT</code> <code>E_TIMEOUT</code></td><td>网络层</td></tr>
+    <tr><td><code>E_TLS_HANDSHAKE</code> <code>E_TLS_CERT</code> <code>E_TLS_TIME</code></td><td>TLS 层（必须区分）</td></tr>
+    <tr><td><code>E_HTTP_STATUS</code> <code>E_RATELIMIT</code> <code>E_PARSE</code></td><td>HTTP 层</td></tr>
+    <tr><td><code>E_API</code></td><td>Provider 业务错误</td></tr>
+    <tr><td><code>E_CA_LOAD</code></td><td>CA 加载失败（仅启动期致命）</td></tr>
+    <tr><td><code>E_NO_IP</code></td><td>探测无可用地址（非错误，仅 skip）</td></tr>
+  </table>
+
+  <h3>A.4 文件与权限</h3>
+  <table>
+    <tr><th style="width:330px">路径</th><th style="width:100px">权限</th><th>备注</th></tr>
+    <tr><td><code>/etc/miniddns/miniddns.conf</code></td><td><code>0640 root:root</code></td><td>可含 zone_id</td></tr>
+    <tr><td><code>/etc/miniddns/cloudflare.token</code></td><td><code>0600 root:root</code></td><td>单行 token</td></tr>
+    <tr><td><code>/opt/miniddns/ca/ca-certificates.crt</code></td><td><code>0644 root:root</code></td><td>CA 快照</td></tr>
+    <tr><td><code>/opt/miniddns/bin/miniddns</code></td><td><code>0755 root:root</code></td><td>静态二进制</td></tr>
+    <tr><td><code>/etc/systemd/system/miniddns.service</code></td><td><code>0644 root:root</code></td><td>由产物中的 <code>systemd/miniddns.service</code> 安装而来</td></tr>
+    <tr><td><code>/usr/local/bin/miniddns</code></td><td>符号链接</td><td>方案 A 的可迁移入口（§12.2）</td></tr>
+    <tr><td><code>/run/miniddns/miniddns.lock</code></td><td>由 systemd 创建</td><td><code>RuntimeDirectory=</code></td></tr>
+  </table>
+
+  <h3>A.5 参考</h3>
+  <ul>
+    <li><code>man 7 netlink</code>、<code>man 7 rtnetlink</code>、<code>linux/if_addr.h</code></li>
+    <li>BearSSL 头文件：<code>inc/bearssl_ssl.h</code>、<code>inc/bearssl_x509.h</code>、<code>inc/bearssl_pem.h</code></li>
+    <li>BearSSL <code>tools/ta.c</code> —— CA PEM → trust anchor 的参考实现，<strong>本方案 §09 应以其为蓝本</strong></li>
+    <li>Cloudflare API：<code>PATCH /zones/{zone_id}/dns_records/{record_id}</code></li>
+    <li>jsmn：<code>https://github.com/zserge/jsmn</code>（单头文件）</li>
+  </ul>
+
+  <div class="callout info">
+    <b class="t">实现完成的最低标准（自查清单）</b>
+    <ul class="chk" style="margin:6px 0">
+      <li>IP 不变时，24 小时内对 provider 的<strong>写请求数为 0</strong></li>
+      <li>产物中的 <code>systemd/miniddns.service</code> 可直接 <code>cp</code> 到 <code>/etc/systemd/system/</code> 后 <code>systemd-analyze verify</code> 无报错，且启动后能收到 netlink 事件（说明 <code>AF_NETLINK</code> 未漏）</li>
+      <li>私有/保留 IP 从不被发送到 provider</li>
+      <li><code>temporary</code>/<code>dadfailed</code> 地址从不被发布</li>
+      <li>任何证书错误都导致<strong>中止且不发请求</strong>，无降级路径</li>
+      <li><code>ldd build/miniddns</code> 显示静态（静态目标）</li>
+      <li><code>MemoryPeak ≤ 6 MB</code> 且 <code>CPUUsageNSec/24h ≤ 2 s</code></li>
+      <li>journald 中 <code>grep 'action=update'</code> 能精确列出每一次真实变更</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  miniddns · 设计规格 v1.1 · 本文档为实现的唯一依据；与实现冲突时以本文档为准并回写修订。
+</footer>
+
+<div class="toc" style="margin-top:30px">
+  <h3>修订记录</h3>
+  <table style="margin:0">
+    <tr><th style="width:80px">版本</th><th>变更</th></tr>
+    <tr><td>1.1</td><td>systemd 单元纳入源码与产物分发：新增 <code>systemd/miniddns.service.in</code> 模板与成品、<code>install.sh</code>、<code>make install</code>、OpenWrt procd 脚本、两种安装布局与可迁移性方案；dist 布局新增 <code>systemd/</code>、<code>openwrt/</code>、<code>install.sh</code> 与 <code>SHA256SUMS</code></td></tr>
+    <tr><td>1.0</td><td>初版：目标/架构/配置/运行时/IP 探测/provider 抽象/TLS+HTTP/CA/日志/CLI/systemd/构建/测试/里程碑/风险</td></tr>
+  </table>
+</div>
+
+</div>
+</body>
+</html>

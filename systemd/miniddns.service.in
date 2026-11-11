@@ -1,0 +1,66 @@
+# systemd/miniddns.service.in  —— 安装后为 /etc/systemd/system/miniddns.service
+# 占位符：@BINDIR@ @CONFDIR@ @DOCDIR@
+# 最低 systemd 版本：248（ProtectProc= 需 247，RestrictSUIDSGID/SystemCallErrorNumber 需 232）
+[Unit]
+Description=miniddns dynamic DNS updater
+Documentation=file:@DOCDIR@/design.md
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/miniddns --foreground
+
+# 可选：启动前做一次 CA/连通性自检（失败则不启动）
+# ExecStartPre=@BINDIR@/miniddns --check-ca
+
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=10s
+
+# --- 凭据（可选，默认注释）---
+# 打开本节前先确认源文件存在：绝对路径形式的 LoadCredential= 指向不存在的文件时，
+# 单元会以 status=243/CREDENTIALS 启动失败，且日志里没有任何 miniddns 输出。
+# 每个 provider 一行，ID 与 [provider].token_file 的 $CREDENTIALS_DIRECTORY/<ID> 对应：
+# LoadCredential=cloudflare.token:@CONFDIR@/cloudflare.token
+
+# 日志：两个流都交 journald；分级靠程序输出的 <PRI> 前缀（§10.1）
+StandardOutput=journal
+StandardError=journal
+
+# --- 加固 ---
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# 必须包含 AF_NETLINK，否则 socket() 直接 EAFNOSUPPORT
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
+
+RuntimeDirectory=miniddns
+RuntimeDirectoryMode=0750
+
+# 仅当 log_target=file 时需要（日志目录不受 ProtectSystem=strict 影响）：
+# LogsDirectory=miniddns
+# LogsDirectoryMode=0750
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
