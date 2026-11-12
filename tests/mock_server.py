@@ -5,6 +5,7 @@ import socket
 import ssl
 import subprocess
 import threading
+import time
 
 
 def _run(cmd):
@@ -43,9 +44,11 @@ def generate_certs(d):
 
 
 class MockServer:
-    def __init__(self, certdir, statefile, logfile, cert="server.pem", key="server.key"):
+    def __init__(self, certdir, statefile, logfile, cert="server.pem", key="server.key",
+                 stall=False):
         self.statefile = statefile
         self.logfile = logfile
+        self.stall = stall
         self.stop = False
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -93,6 +96,13 @@ class MockServer:
             threading.Thread(target=self._handle, args=(conn,), daemon=True).start()
 
     def _handle(self, conn):
+        if self.stall:
+            time.sleep(10.0)
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
         try:
             s = self.ctx.wrap_socket(conn, server_side=True)
         except (ssl.SSLError, OSError):
@@ -137,6 +147,16 @@ class MockServer:
             self.log("APPBYTES %d" % appbytes)
             self.log("%s %s %s" % (method, path, body[:512].decode("latin1", "replace")))
             self._respond(s, method, path, body.decode("latin1", "replace"))
+            st = self.state()
+            if st.get("truncate_body"):
+                try:
+                    s.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+            if st.get("keep_alive"):
+                time.sleep(5.0)
+            elif st.get("truncate_body"):
+                time.sleep(1.0)
         else:
             self.log("APPBYTES 0")
         try:
@@ -177,10 +197,15 @@ class MockServer:
             payload = json.dumps(payload_obj, separators=(",", ":"))
         raw = payload.encode()
         headers.append("Content-Type: %s" % ctype)
-        headers.append("Connection: close")
+        headers.append("Connection: %s" % ("keep-alive" if st.get("keep_alive") else "close"))
         if st.get("retry_after"):
             headers.append("Retry-After: %s" % st["retry_after"])
-        if st.get("chunked"):
+        if st.get("truncate_body"):
+            # Close-delimited, deliberately truncated to a shorter valid IP.
+            if len(raw) >= 2:
+                raw = raw[:-2]
+            out = ("\r\n".join(headers) + "\r\n\r\n").encode() + raw
+        elif st.get("chunked"):
             headers.append("Transfer-Encoding: chunked")
             chunks = b""
             for i in range(0, len(raw), max(1, len(raw) // 2 or 1)):

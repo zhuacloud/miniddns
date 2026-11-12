@@ -24,8 +24,14 @@ cleanup() { rm -rf "$PWD/ca"; }
 trap cleanup EXIT INT TERM
 
 if [ "$MODE" = "ASAN" ]; then
-    ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./build/unit
-    echo "ASan build: integration tests skipped (LD_PRELOAD conflicts with sanitizer runtime)"
+    ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:verify_asan_link_order=0 \
+    UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+        ./build/unit
+    # integration.py also sets verify_asan_link_order=0 for its subprocesses;
+    # this keeps provider/TLS paths under ASan instead of skipping them.
+    ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:verify_asan_link_order=0 \
+    UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+        python3 integration.py
 else
     ./build/unit
     python3 integration.py

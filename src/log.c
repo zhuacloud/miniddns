@@ -67,39 +67,69 @@ static const char *level_name(int level)
     }
 }
 
-/* Never emit raw control characters (§10.1). */
-static void sanitize(char *dst, size_t cap, const char *src)
+/* Never emit raw control characters (§10.1). Returns 1 when truncated. */
+static int sanitize(char *dst, size_t cap, const char *src)
 {
     size_t o = 0;
-    for (; *src && o + 4 < cap; src++) {
+
+    if (cap == 0) return 1;
+    for (; *src; src++) {
         unsigned char c = (unsigned char)*src;
+        const char *rep = NULL;
+        char hex[8];
+
         switch (c) {
-        case '\n': dst[o++] = '\\'; dst[o++] = 'n'; break;
-        case '\r': dst[o++] = '\\'; dst[o++] = 'r'; break;
-        case '\t': dst[o++] = '\\'; dst[o++] = 't'; break;
+        case '\n': rep = "\\n"; break;
+        case '\r': rep = "\\r"; break;
+        case '\t': rep = "\\t"; break;
         default:
             if (c < 0x20 || c == 0x7f) {
-                int n = snprintf(dst + o, cap - o, "\\x%02x", c);
-                if (n > 0) o += (size_t)n;
-            } else {
-                dst[o++] = (char)c;
+                snprintf(hex, sizeof(hex), "\\x%02x", c);
+                rep = hex;
             }
+        }
+        if (rep != NULL) {
+            size_t n = strlen(rep);
+            if (o + n + 1 > cap) { dst[o] = '\0'; return 1; }
+            memcpy(dst + o, rep, n);
+            o += n;
+        } else {
+            if (o + 2 > cap) { dst[o] = '\0'; return 1; }
+            dst[o++] = (char)c;
         }
     }
     dst[o] = '\0';
+    return 0;
 }
 
 static void emit(int level, const char *body)
 {
-    char safe[MN_LOG_LINE_MAX];
-    char line[MN_LOG_LINE_MAX + 64];
-    FILE *out = g_file ? g_file : stdout;
+    char line[MN_LOG_LINE_MAX + 1];
+    const char *lvl = level_name(level);
+    size_t prefix, suffix_max, avail, used;
+    int truncated;
+
     if (level > g_level) return;             /* numeric syslog priorities */
-    sanitize(safe, sizeof(safe), body);
-    snprintf(line, sizeof(line), "<%d>miniddns: %s level=%s", level, safe, level_name(level));
+    prefix = (size_t)snprintf(line, sizeof(line), "<%d>miniddns: ", level);
+    if (prefix >= sizeof(line)) prefix = sizeof(line) - 1;
+    suffix_max = strlen(" level=") + strlen(lvl) + strlen(" truncated=1");
+    if (prefix + suffix_max + 1 > sizeof(line)) {
+        /* Defensive: should never happen with the fixed level names. */
+        line[0] = '\0';
+        used = 0;
+        avail = 0;
+    } else {
+        avail = sizeof(line) - 1 - prefix - suffix_max;
+        used = prefix;
+    }
+    truncated = sanitize(line + used, avail + 1, body);
+    used += strlen(line + used);
+    snprintf(line + used, sizeof(line) - used, " level=%s%s",
+             lvl, truncated ? " truncated=1" : "");
     if (g_sink) {
         g_sink(level, line, g_sink_ctx);
     } else {
+        FILE *out = g_file ? g_file : stdout;
         fputs(line, out);
         fputc('\n', out);
         fflush(out);

@@ -415,6 +415,7 @@ static int valid_fqdn(const char *s)
 {
     size_t i, n = strlen(s);
     if (n == 0 || n > 253 || strchr(s, '.') == NULL) return 0;
+    if (s[n - 1] == '.') return 0;   /* §04.5: no trailing dot */
     for (i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
         if (!(isalnum(c) || c == '.' || c == '-' || c == '_')) return 0;
@@ -427,7 +428,6 @@ static int validate(struct parser *ps, int diagnostic)
     struct mn_cfg *c = ps->cfg;
     size_t i, j;
     char eb[256];
-    (void)diagnostic;
     if (c->core.connect_timeout_ms > c->core.http_timeout_ms) {
         snprintf(ps->err, sizeof(ps->err), "connect_timeout_ms must be <= http_timeout_ms");
         return -1;
@@ -436,19 +436,47 @@ static int validate(struct parser *ps, int diagnostic)
         const char *lf = c->core.log_file;
         const char *ld = getenv("LOGS_DIRECTORY");
         int ok = 0;
+
         if (!lf[0]) {
             snprintf(ps->err, sizeof(ps->err),
                      "log_target=file requires log_file under $LOGS_DIRECTORY or /var/log/miniddns/");
             return -1;
         }
-        if (strncmp(lf, "$LOGS_DIRECTORY/", 16) == 0) ok = 1;
-        else if (strncmp(lf, "/var/log/miniddns/", 18) == 0) ok = 1;
-        else if (ld && ld[0] && strncmp(lf, ld, strlen(ld)) == 0
-                 && (lf[strlen(ld)] == '/' || lf[strlen(ld)] == '\0')) ok = 1;
-        if (!ok) {
-            snprintf(ps->err, sizeof(ps->err),
-                     "log_file must be under $LOGS_DIRECTORY or /var/log/miniddns/ (ProtectSystem=strict)");
-            return -1;
+        if (strncmp(lf, "$LOGS_DIRECTORY/", 16) == 0) {
+            if (ld && ld[0]) {
+                char expanded[MN_PATH_MAX];
+                int n = snprintf(expanded, sizeof(expanded), "%s/%s", ld, lf + 16);
+
+                if (n < 0 || (size_t)n >= sizeof(expanded)) {
+                    snprintf(ps->err, sizeof(ps->err),
+                             "log_file expanded path too long");
+                    return -1;
+                }
+                snprintf(c->core.log_file, sizeof(c->core.log_file), "%s", expanded);
+                lf = c->core.log_file;
+                ok = 1;
+            } else if (diagnostic) {
+                /* Diagnostics run outside systemd; the unit provides the env. */
+                mn_log(MN_LOG_WARN,
+                       "logs_directory_unset diagnostic=1 fallback=stdout");
+                c->core.log_target = MN_LOG_JOURNALD;
+                c->core.log_file[0] = '\0';
+                ok = 1;
+            } else {
+                snprintf(ps->err, sizeof(ps->err),
+                         "log_file needs $LOGS_DIRECTORY (systemd LogsDirectory=) but it is unset");
+                return -1;
+            }
+        }
+        if (c->core.log_target == MN_LOG_FILE) {
+            if (!ok && strncmp(lf, "/var/log/miniddns/", 18) == 0) ok = 1;
+            else if (!ok && ld && ld[0] && strncmp(lf, ld, strlen(ld)) == 0
+                     && (lf[strlen(ld)] == '/' || lf[strlen(ld)] == '\0')) ok = 1;
+            if (!ok) {
+                snprintf(ps->err, sizeof(ps->err),
+                         "log_file must be under $LOGS_DIRECTORY or /var/log/miniddns/ (ProtectSystem=strict)");
+                return -1;
+            }
         }
     }
     /* lock_file default: $RUNTIME_DIRECTORY/<instance>.lock, else /run/miniddns, else /tmp */
@@ -494,6 +522,14 @@ static int validate(struct parser *ps, int diagnostic)
             }
             if (!comma) break;
             p = comma + 1;
+        }
+        if (count == 0 &&
+            (c->detect.ipv4_mode == MN_IP4_EXTERNAL ||
+             c->detect.ipv4_mode == MN_IP4_AUTO)) {
+            snprintf(ps->err, sizeof(ps->err),
+                     "ipv4_echo_url must not be empty when ipv4_mode=%s",
+                     c->detect.ipv4_mode == MN_IP4_EXTERNAL ? "external" : "auto");
+            return -1;
         }
     }
     for (i = 0; i < c->n_providers; i++) {
@@ -541,7 +577,7 @@ static int validate(struct parser *ps, int diagnostic)
             return -1;
         }
         for (j = 0; j < c->n_providers; j++)
-            if (strcmp(c->providers[j].id, r->provider_id) == 0) found = 1;
+            if (strcasecmp(c->providers[j].id, r->provider_id) == 0) found = 1;
         if (!found) {
             snprintf(ps->err, sizeof(ps->err), "line=%d record.provider unknown=%s", r->line, r->provider_id);
             return -1;

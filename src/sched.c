@@ -37,6 +37,7 @@ int64_t mn_backoff_delay_ms(const int *seq, size_t n, size_t idx,
     /* §05.5: non-self-healing errors jump to the largest step. */
     if (errcode == E_TLS_CERT ||
         (errcode == E_HTTP_STATUS && http_status >= 400 && http_status < 500 && http_status != 429) ||
+        errcode == E_PARSE ||
         errcode == E_API) {
         size_t i;
         for (i = 0; i < n; i++) if (seq[i] > base) base = clamp_s(seq[i]);
@@ -59,6 +60,19 @@ size_t mn_backoff_next(size_t idx, size_t n)
 {
     if (n == 0) return 0;
     return (idx + 1 < n) ? idx + 1 : n - 1;
+}
+
+int64_t mn_backoff_take(const int *seq, size_t n, size_t *idx,
+                        int interval_fallback_s, int errcode, int http_status,
+                        int retry_after_s)
+{
+    size_t current = idx != NULL ? *idx : 0;
+    int64_t delay = mn_backoff_delay_ms(seq, n, current, interval_fallback_s,
+                                        errcode, http_status, retry_after_s);
+
+    if (idx != NULL)
+        *idx = mn_backoff_next(current, n);
+    return delay;
 }
 
 /* civil date -> days since 1970-01-01 (Hinnant); no timezone dependence */

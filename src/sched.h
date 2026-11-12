@@ -19,6 +19,12 @@ int64_t mn_backoff_delay_ms(const int *seq, size_t n, size_t idx,
                             int retry_after_s);
 size_t  mn_backoff_next(size_t idx, size_t n);
 
+/* Return the delay for the current step, then advance *idx for the next
+   failure.  This keeps the first failure on seq[0] (5s by default). */
+int64_t mn_backoff_take(const int *seq, size_t n, size_t *idx,
+                        int interval_fallback_s, int errcode, int http_status,
+                        int retry_after_s);
+
 /* Retry-After: delta-seconds or HTTP-date; clamp [1,86400]; -1 = absent/invalid */
 int mn_retry_after_seconds(const char *value, time_t now);
 

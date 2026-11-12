@@ -156,8 +156,8 @@ static void nl_handle_link(struct mn_nl *nl, const struct nlmsghdr *nh,
     nl_update_link(nl, idx, name, up);
 }
 
-static int nl_decode_addr(struct mn_nl *nl, const struct nlmsghdr *nh,
-                          struct mn_addr *a)
+int mn_nl_decode_addr(struct mn_nl *nl, const struct nlmsghdr *nh,
+                      struct mn_addr *a)
 {
     struct ifaddrmsg *ifa_p;
     struct ifaddrmsg ifa;
@@ -243,7 +243,7 @@ static void nl_add_addr(struct mn_nl *nl, struct mn_addr_set *out,
 
     if (out->n >= MN_MAX_ADDRS)
         return;
-    if (nl_decode_addr(nl, nh, &a))
+    if (mn_nl_decode_addr(nl, nh, &a))
         out->a[out->n++] = a;
 }
 
@@ -256,7 +256,7 @@ static void nl_debug_addr_event(struct mn_nl *nl, const struct nlmsghdr *nh,
 
     if (mn_log_get_level() < MN_LOG_DEBUG)
         return;
-    if (!nl_decode_addr(nl, nh, &a))
+    if (!mn_nl_decode_addr(nl, nh, &a))
         return;
     if (a.family == AF_INET6)
         family = "inet6";
@@ -675,6 +675,21 @@ int mn_nl_rescan(struct mn_nl *nl, struct mn_addr_set *out,
     return MN_OK;
 }
 
+int mn_nl_recv_error(int errnum, int *overflow, char *err, size_t errlen)
+{
+    if (errnum == EAGAIN || errnum == EWOULDBLOCK)
+        return 1;
+    if (errnum == ENOBUFS) {
+        if (overflow != NULL)
+            *overflow = 1;
+        nl_set_err(err, errlen, "netlink drain recvmsg", ENOBUFS);
+        nl_log_overflow();
+        return 1;
+    }
+    nl_set_err(err, errlen, "netlink drain recvmsg", errnum);
+    return -1;
+}
+
 int mn_nl_drain(struct mn_nl *nl, int *overflow, char *err, size_t errlen)
 {
     union {
@@ -720,17 +735,12 @@ int mn_nl_drain(struct mn_nl *nl, int *overflow, char *err, size_t errlen)
                 break;
             continue;
         }
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
-            break;
-        if (errno == ENOBUFS) {
-            if (overflow != NULL)
-                *overflow = 1;
-            nl_set_err(err, errlen, "netlink drain recvmsg", ENOBUFS);
-            nl_log_overflow();
+        {
+            int action = mn_nl_recv_error(errno, overflow, err, errlen);
+            if (action < 0)
+                return -1;
             break;
         }
-        nl_set_err(err, errlen, "netlink drain recvmsg", errno);
-        return -1;
     }
     return interesting ? 1 : 0;
 }

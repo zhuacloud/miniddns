@@ -19,6 +19,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utime.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <linux/if_addr.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
+#include <net/if.h>
 
 static int checks, failures;
 
@@ -32,12 +38,12 @@ static int checks, failures;
     } \
 } while (0)
 
-static char cap_lines[128][1024];
+static char cap_lines[128][2048];
 static int cap_n;
 static void sink(int level, const char *line, void *ctx)
 {
     (void)level; (void)ctx;
-    if (cap_n < 128) snprintf(cap_lines[cap_n++], 1024, "%s", line);
+    if (cap_n < 128) snprintf(cap_lines[cap_n++], 2048, "%s", line);
 }
 
 static int write_file(const char *path, const char *data)
@@ -124,6 +130,33 @@ static void test_cfg(void)
     CHECK(mn_cfg_load("tmp/bad_logfile.conf", 1, 1, &c, err, sizeof(err)) != 0,
           "log_file outside LogsDirectory must be rejected");
     CHECK(strstr(err, "LOGS_DIRECTORY") != NULL, "log_file error hints: %s", err);
+
+    write_file("tmp/trailing_dot.conf",
+               "[provider]\nid = p\nkind = cloudflare\n"
+               "zone_id = 023e105f4ecef8ad9ca31a8372d0c353\ntoken = t\n"
+               "[record]\nprovider = p\nname = home.example.com.\ntype = A\n");
+    CHECK(mn_cfg_load("tmp/trailing_dot.conf", 1, 1, &c, err, sizeof(err)) != 0,
+          "FQDN trailing dot must be rejected: %s", err);
+
+    write_file("tmp/provider_case.conf",
+               "[provider]\nid = CF-MAIN\nkind = cloudflare\n"
+               "zone_id = 023e105f4ecef8ad9ca31a8372d0c353\ntoken = t\n"
+               "[record]\nprovider = cf-main\nname = home.example.com\ntype = A\n");
+    CHECK(mn_cfg_load("tmp/provider_case.conf", 1, 1, &c, err, sizeof(err)) == 0,
+          "provider id reference is case-insensitive: %s", err);
+
+    write_file("tmp/empty_echo.conf", "[detect]\nipv4_mode = external\nipv4_echo_url =\n");
+    CHECK(mn_cfg_load("tmp/empty_echo.conf", 1, 1, &c, err, sizeof(err)) != 0,
+          "empty ipv4_echo_url must be rejected in external mode: %s", err);
+
+    setenv("LOGS_DIRECTORY", "/tmp/miniddns-logs-test", 1);
+    write_file("tmp/logs_dir.conf",
+               "[core]\nlog_target = file\nlog_file = $LOGS_DIRECTORY/miniddns.log\n");
+    CHECK(mn_cfg_load("tmp/logs_dir.conf", 1, 1, &c, err, sizeof(err)) == 0,
+          "LOGS_DIRECTORY config loads: %s", err);
+    CHECK(!strcmp(c.core.log_file, "/tmp/miniddns-logs-test/miniddns.log"),
+          "LOGS_DIRECTORY expanded: %s", c.core.log_file);
+    unsetenv("LOGS_DIRECTORY");
 }
 
 /* ----------------------------------------------------------------- util */
@@ -177,6 +210,116 @@ static void test_util(void)
     chmod("/tmp/miniddns-outside-ca.pem", 0644);
     rc = mn_checked_read("/tmp/miniddns-outside-ca.pem", MN_FILE_CA, buf, sizeof(buf), &len, 1, err, sizeof(err));
     CHECK(rc != 0 && strstr(err, "whitelist") != NULL, "CA outside whitelist rejected: %s", err);
+
+    /* exact size boundary: == limit is accepted, limit+1 is rejected */
+    {
+        char *big = (char *)malloc((size_t)MN_LIMIT_CONF_FILE + 2);
+        char *rbuf = (char *)malloc((size_t)MN_LIMIT_CONF_FILE + 1);
+        FILE *f;
+        CHECK(big != NULL && rbuf != NULL, "boundary buffers allocated");
+        if (big != NULL && rbuf != NULL) {
+            memset(big, '#', (size_t)MN_LIMIT_CONF_FILE + 1);
+            big[MN_LIMIT_CONF_FILE] = '\n';
+            f = fopen("tmp/exact.conf", "wb");
+            CHECK(f != NULL, "exact.conf created");
+            if (f != NULL) {
+                fwrite(big, 1, (size_t)MN_LIMIT_CONF_FILE, f);
+                fclose(f);
+                chmod("tmp/exact.conf", 0644);
+                rc = mn_checked_read("tmp/exact.conf", MN_FILE_CONF, rbuf,
+                                     (size_t)MN_LIMIT_CONF_FILE + 1, &len, 1,
+                                     err, sizeof(err));
+                CHECK(rc == 0 && len == (size_t)MN_LIMIT_CONF_FILE,
+                      "exactly limit bytes accepted: rc=%d len=%zu err=%s", rc, len, err);
+            }
+            f = fopen("tmp/over.conf", "wb");
+            CHECK(f != NULL, "over.conf created");
+            if (f != NULL) {
+                fwrite(big, 1, (size_t)MN_LIMIT_CONF_FILE + 1, f);
+                fclose(f);
+                chmod("tmp/over.conf", 0644);
+                rc = mn_checked_read("tmp/over.conf", MN_FILE_CONF, rbuf,
+                                     (size_t)MN_LIMIT_CONF_FILE + 1, &len, 1,
+                                     err, sizeof(err));
+                CHECK(rc != 0 && strstr(err, "too large") != NULL,
+                      "limit+1 bytes rejected: %s", err);
+            }
+        }
+        free(big);
+        free(rbuf);
+    }
+}
+
+/* -------------------------------------------------------------- netlink */
+static void add_rta(char *buf, size_t *off, int type, const void *data, size_t len)
+{
+    struct rtattr *rta = (struct rtattr *)(buf + *off);
+    rta->rta_type = (unsigned short)type;
+    rta->rta_len = (unsigned short)RTA_LENGTH(len);
+    if (len > 0) memcpy(RTA_DATA(rta), data, len);
+    *off += RTA_ALIGN(rta->rta_len);
+}
+
+static void test_nl_decode(void)
+{
+    struct mn_nl nl;
+    struct mn_addr a;
+    struct {
+        struct nlmsghdr nlh;
+        struct ifaddrmsg ifa;
+        char attrs[128];
+    } msg;
+    unsigned lo = if_nametoindex("lo");
+    unsigned char v6[16];
+    uint32_t flags = 0x20;   /* deprecated */
+    struct ifa_cacheinfo ci;
+    size_t off = 0;
+
+    memset(&nl, 0, sizeof(nl));
+    memset(&a, 0, sizeof(a));
+    memset(&msg, 0, sizeof(msg));
+    if (lo == 0)
+        lo = 1;
+    nl.n_links = 1;
+    nl.links[0].idx = lo;
+    nl.links[0].up = 1;
+    snprintf(nl.links[0].name, sizeof(nl.links[0].name), "lo");
+
+    CHECK(inet_pton(AF_INET6, "2001:4860:4860::8888", v6) == 1, "v6 fixture");
+    memset(&ci, 0, sizeof(ci));
+
+    msg.nlh.nlmsg_type = RTM_NEWADDR;
+    msg.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(msg.ifa));
+    msg.ifa.ifa_family = AF_INET6;
+    msg.ifa.ifa_prefixlen = 64;
+    msg.ifa.ifa_flags = 0x01;       /* must be overridden by IFA_FLAGS */
+    msg.ifa.ifa_scope = 0;
+    msg.ifa.ifa_index = lo;
+    add_rta(msg.attrs, &off, IFA_ADDRESS, v6, sizeof(v6));
+    add_rta(msg.attrs, &off, IFA_FLAGS, &flags, sizeof(flags));
+    add_rta(msg.attrs, &off, IFA_CACHEINFO, &ci, sizeof(ci));
+    msg.nlh.nlmsg_len += (uint32_t)RTA_ALIGN(off);
+
+    CHECK(mn_nl_decode_addr(&nl, &msg.nlh, &a) == 1, "nl_decode_addr accepts v6 message");
+    CHECK(a.family == AF_INET6 && a.flags == 0x20,
+          "IFA_FLAGS 32-bit overrides ifa_flags: family=%d flags=0x%x", a.family, a.flags);
+    CHECK(a.has_cacheinfo && a.valid_lft == 0, "IFA_CACHEINFO decoded");
+    CHECK(a.if_up == 1 && !strcmp(a.ifname, "lo"),
+          "if_indextoname + IFF_UP table: name=%s up=%d", a.ifname, a.if_up);
+
+    {
+        int overflow = 0;
+        char err[256];
+        err[0] = '\0';
+        CHECK(mn_nl_recv_error(ENOBUFS, &overflow, err, sizeof(err)) == 1 && overflow == 1,
+              "ENOBUFS sets overflow");
+        CHECK(strstr(err, "buffer") != NULL, "ENOBUFS error text: %s", err);
+        overflow = 0;
+        CHECK(mn_nl_recv_error(EAGAIN, &overflow, err, sizeof(err)) == 1 && overflow == 0,
+              "EAGAIN drains cleanly");
+        CHECK(mn_nl_recv_error(EPIPE, &overflow, err, sizeof(err)) == -1,
+              "other errno is a hard error");
+    }
 }
 
 /* ------------------------------------------------------------------ log */
@@ -184,7 +327,7 @@ static void test_log(void)
 {
     int i;
     const char *keys[2] = { "message", "x" };
-    char longval[512];
+    char longval[2048];
     const char *vals[2];
     cap_n = 0;
     mn_log_set_sink(sink, NULL);
@@ -222,6 +365,18 @@ static void test_log(void)
     for (i = 0; i < 3; i++) mn_log_repeat(MN_LOG_INFO, "k2", "record action=unchanged ip=2.2.2.2");
     mn_log_repeat_flush();
     CHECK(cap_n == 1 && strstr(cap_lines[0], "repeat=3"), "flush residual, got %d", cap_n);
+
+    cap_n = 0;
+    for (i = 0; i < 10; i++)
+        mn_log(MN_LOG_INFO, "record action=update ip=1.1.1.1");
+    CHECK(cap_n == 10, "action=update must never fold, got %d", cap_n);
+
+    memset(longval, 'x', sizeof(longval) - 1);
+    longval[sizeof(longval) - 1] = '\0';
+    cap_n = 0;
+    mn_log(MN_LOG_INFO, "%s", longval);
+    CHECK(strlen(cap_lines[0]) <= 1024 && strstr(cap_lines[0], "truncated=1"),
+          "log line capped at 1024 with truncated=1 (len=%zu)", strlen(cap_lines[0]));
     mn_log_set_sink(NULL, NULL);
 }
 
@@ -248,6 +403,14 @@ static void test_sched(void)
     CHECK(mn_backoff_delay_ms(seq, 4, 0, 900, E_RATELIMIT, 429, 30) == 30000, "Retry-After override");
     CHECK(mn_backoff_delay_ms(seq, 4, 0, 0, E_HTTP_STATUS, 403, -1) == 300000, "4xx max backoff");
     CHECK(mn_backoff_delay_ms(seq, 4, 0, 0, E_TLS_CERT, 0, -1) == 300000, "cert max backoff");
+    CHECK(mn_backoff_delay_ms(seq, 4, 0, 0, E_PARSE, 0, -1) == 300000, "E_PARSE max backoff");
+    {
+        size_t idx = 0;
+        CHECK(mn_backoff_take(seq, 4, &idx, 0, 0, 0, -1) == 5000 && idx == 1,
+              "first failure uses seq[0]=5s");
+        CHECK(mn_backoff_take(seq, 4, &idx, 0, 0, 0, -1) == 15000 && idx == 2,
+              "second failure uses seq[1]=15s");
+    }
     CHECK(mn_backoff_delay_ms(seq, 4, 0, 0, 0, 0, 100000) == 86400000, "Retry-After clamp");
     CHECK(mn_backoff_next(3, 4) == 3 && mn_backoff_next(0, 4) == 1, "backoff index");
 
@@ -499,6 +662,8 @@ static void test_http_parse(void)
         CHECK(rc != 0 && strstr(err, "body_too_large"), "body limit: %s", err);
         mn_http_result_free(&r);
     }
+    CHECK(!strcmp(mn_tls_version_name(BR_TLS12), "1.2"), "TLS version name 1.2");
+    CHECK(!strcmp(mn_tls_version_name(0), "unknown"), "TLS unknown version name");
 }
 
 /* ----------------------------------------------------------- json_util */
@@ -603,6 +768,7 @@ int main(void)
     printf("== miniddns unit tests ==\n");
     test_cfg();
     test_util();
+    test_nl_decode();
     test_log();
     test_sched();
     test_detect();

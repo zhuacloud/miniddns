@@ -57,7 +57,7 @@ static void ca_set_err(char *err, size_t errlen, const char *fmt, ...)
 }
 
 /* Howard Hinnant's civil_from_days, with days counted from 1970-01-01. */
-static int ca_format_date(uint32_t days, char *out, size_t cap)
+int mn_ca_format_date(uint32_t days, char *out, size_t cap)
 {
     int64_t z, era, doe, yoe, y, doy, mp, d, m;
     int r;
@@ -720,13 +720,13 @@ int mn_ca_init(struct mn_ca *ca, const char *path, int allow_non_root_owner,
     memset(ca, 0, sizeof *ca);
     ca->allow_non_root_owner = allow_non_root_owner;
     ca_set_err(err, errlen, "%s", "");
-    buf = (char *)malloc((size_t)MN_LIMIT_CA_FILE);
+    buf = (char *)malloc((size_t)MN_LIMIT_CA_FILE + 1u);
     if (buf == NULL) {
         ca_set_err(err, errlen, "out of memory reading CA bundle");
         return E_CA_LOAD;
     }
     len = 0;
-    if (mn_checked_read(path, MN_FILE_CA, buf, (size_t)MN_LIMIT_CA_FILE,
+    if (mn_checked_read(path, MN_FILE_CA, buf, (size_t)MN_LIMIT_CA_FILE + 1u,
                         &len, allow_non_root_owner, err, errlen) != 0) {
         if (err != NULL && errlen > 0 && err[0] == '\0') {
             ca_set_err(err, errlen, "ca checked_read failed path=%s", path);
@@ -757,7 +757,7 @@ int mn_ca_init(struct mn_ca *ca, const char *path, int allow_non_root_owner,
     ca->sig.size = sb.st_size;
     ca->sig.ino = sb.st_ino;
 
-    ca_format_date(info.earliest_days, date, sizeof date);
+    mn_ca_format_date(info.earliest_days, date, sizeof date);
     ca_log_value(ca->path, logpath, sizeof logpath);
     mn_log(MN_LOG_INFO,
            "ca loaded anchors=%zu path=%s earliest_notAfter=%s source=%s",
@@ -821,7 +821,7 @@ int mn_ca_refresh(struct mn_ca *ca)
         return 0;
     }
     ca_log_value(ca->path, logpath, sizeof logpath);
-    buf = (char *)malloc((size_t)MN_LIMIT_CA_FILE);
+    buf = (char *)malloc((size_t)MN_LIMIT_CA_FILE + 1u);
     if (buf == NULL) {
         mn_log(MN_LOG_ERROR,
                "ca reload_failed keep_old_anchors=%zu path=%s err=E_CA_LOAD",
@@ -831,7 +831,7 @@ int mn_ca_refresh(struct mn_ca *ca)
     len = 0;
     detail[0] = '\0';
     r = mn_checked_read(ca->path, MN_FILE_CA, buf,
-                        (size_t)MN_LIMIT_CA_FILE, &len,
+                        (size_t)MN_LIMIT_CA_FILE + 1u, &len,
                         ca->allow_non_root_owner, detail, sizeof detail);
     if (r != 0) {
         free(buf);

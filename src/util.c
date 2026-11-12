@@ -189,8 +189,8 @@ int mn_checked_read(const char *path, int cls, char *buf, size_t cap,
 {
     char resolved[PATH_MAX], real[MN_PATH_MAX];
     struct stat st;
-    int fd, rc;
-    size_t total = 0, maxsize;
+    int fd;
+    size_t total = 0, maxsize, maxread;
     const char *obj = (cls == MN_FILE_TOKEN) ? "token" : (cls == MN_FILE_CA ? "ca" : "config");
 
     if (!path || !path[0] || !buf || cap == 0) {
@@ -260,8 +260,10 @@ int mn_checked_read(const char *path, int cls, char *buf, size_t cap,
         }
     }
 
-    for (;;) {
-        ssize_t r = read(fd, buf + total, cap - 1 - total);
+    maxread = cap - 1;
+    if (maxread > maxsize) maxread = maxsize;
+    while (total < maxread) {
+        ssize_t r = read(fd, buf + total, maxread - total);
         if (r < 0) {
             if (errno == EINTR) continue;
             set_err(err, errlen, "%s: read failed path=%s errno=%d", obj, real, errno);
@@ -269,15 +271,28 @@ int mn_checked_read(const char *path, int cls, char *buf, size_t cap,
         }
         if (r == 0) break;
         total += (size_t)r;
-        if (total >= cap - 1) {
-            set_err(err, errlen, "%s: file too large path=%s", obj, real);
+    }
+    if (total == maxread) {
+        unsigned char extra;
+        ssize_t r;
+        do {
+            r = read(fd, &extra, 1);
+        } while (r < 0 && errno == EINTR);
+        if (r < 0) {
+            set_err(err, errlen, "%s: read failed path=%s errno=%d", obj, real, errno);
+            close(fd); return -1;
+        }
+        if (r > 0) {
+            if (maxread < maxsize)
+                set_err(err, errlen, "%s: read buffer too small path=%s", obj, real);
+            else
+                set_err(err, errlen, "%s: file too large path=%s", obj, real);
             close(fd); return -1;
         }
     }
     close(fd);
     buf[total] = '\0';
     if (len) *len = total;
-    (void)rc;
     return 0;
 }
 

@@ -511,7 +511,16 @@ static int tls_normalize_extra(const char *extra, char *out, size_t cap,
                 return -1;
             }
         }
-        if (tls_iascii_eq(line, name_len, "Accept-Encoding")) {
+        if (tls_iascii_eq(line, name_len, "Accept-Encoding") ||
+            tls_iascii_eq(line, name_len, "Content-Encoding") ||
+            tls_iascii_eq(line, name_len, "Host") ||
+            tls_iascii_eq(line, name_len, "Content-Length") ||
+            tls_iascii_eq(line, name_len, "Transfer-Encoding") ||
+            tls_iascii_eq(line, name_len, "Connection") ||
+            tls_iascii_eq(line, name_len, "Proxy-Connection") ||
+            tls_iascii_eq(line, name_len, "Trailer") ||
+            tls_iascii_eq(line, name_len, "Upgrade") ||
+            tls_iascii_eq(line, name_len, "TE")) {
             return -1;
         }
         if (o + line_len + 2 >= cap) {
@@ -1410,18 +1419,19 @@ static int tls_low_write(void *ctx, const unsigned char *src, size_t len)
 }
 
 static int tls_connect(const struct mn_cfg *cfg, const char *host, int port,
-                       int64_t deadline, int *fd_out,
+                       int64_t deadline, int *fd_out, int64_t *deadline_out,
                        char *err, size_t errlen,
                        char *reason, size_t reasoncap)
 {
     struct addrinfo hints, *res, *ai;
     char portstr[16], detail[160];
     const char *why = "connect";
-    int rc, r, ga, last_rc, successes, soerr;
+    int rc, r, ga, last_rc, successes, soerr = 0;
     int64_t connect_deadline, left;
     socklen_t slen;
 
     *fd_out = -1;
+    if (deadline_out != NULL) *deadline_out = 0;
     if (port <= 0 || port > 65535) {
         tls_copy_literal(reason, reasoncap, "bad_port");
         tls_set_err(err, errlen, "reason=bad_port");
@@ -1543,6 +1553,7 @@ static int tls_connect(const struct mn_cfg *cfg, const char *host, int port,
         }
         tls_set_socket_timeouts(fd, deadline);
         *fd_out = fd;
+        if (deadline_out != NULL) *deadline_out = connect_deadline;
         freeaddrinfo(res);
         return MN_OK;
     }
@@ -1567,6 +1578,8 @@ static int tls_setup(struct mn_tls *t,
      * installs the anchors through br_x509_minimal_init() before any reset.
      */
     br_ssl_client_init_full(&t->sc, &t->xc, anchors, n);
+    /* §08.1: never negotiate TLS 1.0/1.1. */
+    br_ssl_engine_set_versions(&t->sc.eng, BR_TLS12, BR_TLS12);
     br_x509_minimal_set_hash(&t->xc, br_sha1_ID, &br_sha1_vtable);
     br_x509_minimal_set_hash(&t->xc, br_sha256_ID, &br_sha256_vtable);
     br_x509_minimal_set_hash(&t->xc, br_sha384_ID, &br_sha384_vtable);
@@ -1801,6 +1814,105 @@ static int tls_one_fail(int rc, const char *why, char *reason,
     return rc;
 }
 
+/* Return 1 when the response is complete, 0 when more bytes are needed,
+   -1 when the body is close-delimited (EOF required), and -2 for a framing
+   error that the full parser should report.  Used to stop reading as soon as
+   Content-Length/chunked framing is satisfied (§08.3). */
+static int tls_response_complete(const char *buf, size_t len)
+{
+    size_t pos = 0, line_len, advance, header_bytes = 0, body_start = 0;
+    int has_cl = 0, chunked = 0, te_seen = 0;
+    uint64_t cl = 0;
+
+    if (len == 0) return 0;
+    if (tls_line(buf, len, &line_len, &advance) < 0)
+        return len >= (size_t)MN_LIMIT_HEADER ? -2 : 0;
+    header_bytes = advance;
+    pos = advance;
+
+    for (;;) {
+        const char *line, *colon, *value;
+        size_t name_len, vlen;
+
+        if (pos >= len) return 0;
+        if (tls_line(buf + pos, len - pos, &line_len, &advance) < 0) {
+            if (header_bytes + (len - pos) > (size_t)MN_LIMIT_HEADER)
+                return -2;
+            return 0;
+        }
+        if (header_bytes + advance > (size_t)MN_LIMIT_HEADER)
+            return -2;
+        header_bytes += advance;
+        line = buf + pos;
+        pos += advance;
+        if (line_len == 0) {
+            body_start = pos;
+            break;
+        }
+        colon = (const char *)memchr(line, ':', line_len);
+        if (colon == NULL) continue;
+        name_len = (size_t)(colon - line);
+        value = colon + 1;
+        vlen = line_len - name_len - 1;
+        tls_trim(&value, &vlen);
+
+        if (tls_iascii_eq(line, name_len, "Content-Length")) {
+            uint64_t parsed;
+            if (tls_parse_content_length(value, vlen, &parsed) < 0)
+                return -2;
+            if (!has_cl) {
+                cl = parsed;
+                has_cl = 1;
+            } else if (parsed != cl) {
+                return -2;
+            }
+        } else if (tls_iascii_eq(line, name_len, "Transfer-Encoding")) {
+            if (te_seen || !tls_iascii_eq(value, vlen, "chunked"))
+                return -2;
+            te_seen = 1;
+            chunked = 1;
+        } else if (tls_iascii_eq(line, name_len, "Content-Encoding")) {
+            if (!tls_iascii_eq(value, vlen, "identity"))
+                return -2;
+        }
+    }
+
+    if (chunked) {
+        size_t p = body_start;
+        for (;;) {
+            const char *why = "bad_chunk";
+            size_t chunk;
+
+            if (p >= len) return 0;
+            if (tls_line(buf + p, len - p, &line_len, &advance) < 0)
+                return 0;
+            if (tls_parse_chunk_size(buf + p, line_len, &chunk, &why) < 0)
+                return -2;
+            p += advance;
+            if (chunk == 0) {
+                for (;;) {
+                    if (p >= len) return 0;
+                    if (tls_line(buf + p, len - p, &line_len, &advance) < 0)
+                        return 0;
+                    p += advance;
+                    if (line_len == 0) return 1;
+                }
+            }
+            if (chunk > len - p) return 0;
+            p += chunk;
+            if (len - p < 2) return 0;
+            if (buf[p] != '\r' || buf[p + 1] != '\n') return -2;
+            p += 2;
+        }
+    }
+    if (has_cl) {
+        if (cl > (size_t)MN_LIMIT_BODY) return -2;
+        if (len - body_start < (size_t)cl) return 0;
+        return 1;
+    }
+    return -1;
+}
+
 static int tls_one_request(const struct tls_req_args *args,
                            char **raw_out, size_t *raw_len,
                            struct mn_http_result *out,
@@ -1814,6 +1926,7 @@ static int tls_one_request(const struct tls_req_args *args,
     const char *body, *why;
     size_t body_len, extra_len, hlen, req_len, rlen, rcap;
     int r, fd, rc, parse_rc, nr;
+    int64_t connect_deadline = 0;
     struct mn_tls t;
     unsigned char tmp[4096];
 
@@ -1873,7 +1986,8 @@ static int tls_one_request(const struct tls_req_args *args,
     creason[0] = '\0';
     fd = -1;
     rc = tls_connect(args->cfg, args->host, args->port, args->deadline,
-                     &fd, err, errlen, creason, sizeof creason);
+                     &fd, &connect_deadline, err, errlen,
+                     creason, sizeof creason);
     if (rc != 0) {
         tls_copy_literal(reason, reasoncap, creason);
         free(wire);
@@ -1884,7 +1998,8 @@ static int tls_one_request(const struct tls_req_args *args,
     }
     memset(&t, 0, sizeof t);
     t.fd = fd;
-    t.deadline = args->deadline;
+    /* connect_timeout_ms covers TCP + the TLS handshake (§04.2). */
+    t.deadline = connect_deadline != 0 ? connect_deadline : args->deadline;
     if (tls_setup(&t, args->anchors, args->n_anchors, args->host) != 0) {
         rc = tls_failure_rc(&t);
         why = tls_reason_for_rc(rc);
@@ -1914,13 +2029,21 @@ static int tls_one_request(const struct tls_req_args *args,
         return rc;
     }
     free(wire);
+    /* The handshake is complete; the remaining budget is http_timeout_ms. */
+    t.deadline = args->deadline;
 
     resp = NULL;
     rlen = 0;
     rcap = 0;
     why = "timeout";
     for (;;) {
+        int complete;
+
         if (t.timeout || mn_now_ms() >= args->deadline) {
+            /* A full response may already be buffered even if the server
+               keeps the connection open; do not discard it. */
+            complete = rlen > 0 ? tls_response_complete(resp, rlen) : 0;
+            if (complete != 0) break;
             rc = E_TIMEOUT;
             why = "timeout";
             goto read_fail;
@@ -1933,14 +2056,27 @@ static int tls_one_request(const struct tls_req_args *args,
                 why = "body_too_large";
                 goto read_fail;
             }
+            complete = tls_response_complete(resp, rlen);
+            if (complete > 0) break;
+            if (complete == -2) break;   /* let the full parser report */
             continue;
         }
         if (t.timeout) {
+            complete = rlen > 0 ? tls_response_complete(resp, rlen) : 0;
+            if (complete != 0) break;
             rc = E_TIMEOUT;
             why = "timeout";
             goto read_fail;
         }
         if (t.eof) {
+            /* A close-delimited body is only complete when the peer sent
+               TLS close_notify; a bare TCP FIN is a truncation attack. */
+            r = br_ssl_engine_last_error(&t.sc.eng);
+            if (r != 0) {
+                rc = tls_map_br_error(r);
+                why = "tls_truncated";
+                goto read_fail;
+            }
             break;
         }
         r = br_ssl_engine_last_error(&t.sc.eng);
@@ -2201,25 +2337,41 @@ done:
                             reason, err, errlen, errcode);
 }
 
+const char *mn_tls_version_name(int version)
+{
+    switch (version) {
+    case BR_TLS12: return "1.2";
+    case BR_TLS11: return "1.1";
+    case BR_TLS10: return "1.0";
+    case BR_SSL30: return "3.0";
+    default:       return "unknown";
+    }
+}
+
 int mn_tls_handshake(const struct mn_cfg *cfg, struct mn_ca *ca,
                      const char *host, int port, char *cipher, size_t ciphercap,
-                     int *errcode, char *err, size_t errlen)
+                     int *tls_version, int *errcode, char *err, size_t errlen)
 {
     char reason[MN_TLS_REASON_CAP], creason[MN_TLS_REASON_CAP];
     const br_x509_trust_anchor *anchors;
     struct mn_tls t;
     br_ssl_session_parameters sp;
     size_t n_anchors;
-    int64_t deadline;
+    int64_t deadline, connect_deadline = 0;
     int rc, fd, status, r;
     const char *why;
 
     if (errcode != NULL) {
         *errcode = MN_OK;
     }
+    if (tls_version != NULL) {
+        *tls_version = 0;
+    }
     tls_err_clear(err, errlen);
     tls_copy_literal(reason, sizeof reason, "unknown");
-    tls_copy_literal(cipher, ciphercap, "");
+    if (cipher != NULL && ciphercap > 0) {
+        tls_copy_literal(cipher, ciphercap, "");
+    }
     if (cfg == NULL || ca == NULL || host == NULL || host[0] == '\0' ||
         cipher == NULL || ciphercap == 0 ||
         tls_validate_host(host) < 0) {
@@ -2251,8 +2403,8 @@ int mn_tls_handshake(const struct mn_cfg *cfg, struct mn_ca *ca,
     deadline = mn_now_ms() + tls_http_timeout_ms(cfg);
     creason[0] = '\0';
     fd = -1;
-    rc = tls_connect(cfg, host, port, deadline, &fd, err, errlen,
-                     creason, sizeof creason);
+    rc = tls_connect(cfg, host, port, deadline, &fd, &connect_deadline,
+                     err, errlen, creason, sizeof creason);
     if (rc != 0) {
         tls_copy_literal(reason, sizeof reason, creason);
         status = -1;
@@ -2260,7 +2412,7 @@ int mn_tls_handshake(const struct mn_cfg *cfg, struct mn_ca *ca,
     }
     memset(&t, 0, sizeof t);
     t.fd = fd;
-    t.deadline = deadline;
+    t.deadline = connect_deadline != 0 ? connect_deadline : deadline;
     if (tls_setup(&t, anchors, n_anchors, host) != 0) {
         rc = tls_failure_rc(&t);
         why = tls_reason_for_rc(rc);
@@ -2274,6 +2426,9 @@ int mn_tls_handshake(const struct mn_cfg *cfg, struct mn_ca *ca,
     rc = tls_pump_handshake(&t);
     if (rc == 0) {
         br_ssl_engine_get_session_parameters(&t.sc.eng, &sp);
+        if (tls_version != NULL) {
+            *tls_version = sp.version;
+        }
         r = tls_cipher_name(sp.cipher_suite, cipher, ciphercap);
         tls_zero_secret(&sp, sizeof sp);
         if (r < 0) {

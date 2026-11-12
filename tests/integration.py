@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -71,7 +72,8 @@ def run(args, port, timeout=40, extra_env=None):
     env["LD_PRELOAD"] = PRELOAD
     env["MOCK_PORT"] = str(port)
     env["MOCK_HOSTS"] = "api.cloudflare.com,api.ipify.org"
-    env["ASAN_OPTIONS"] = "detect_leaks=0"
+    env["ASAN_OPTIONS"] = "detect_leaks=0:halt_on_error=1:verify_asan_link_order=0"
+    env["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1"
     if extra_env:
         env.update(extra_env)
     try:
@@ -87,6 +89,46 @@ def run(args, port, timeout=40, extra_env=None):
 
 def out(r):
     return (r.stdout or "") + (r.stderr or "")
+
+
+def daemon_env(port):
+    env = os.environ.copy()
+    env["LD_PRELOAD"] = PRELOAD
+    env["MOCK_PORT"] = str(port)
+    env["MOCK_HOSTS"] = "api.cloudflare.com,api.ipify.org"
+    env["ASAN_OPTIONS"] = "detect_leaks=0:halt_on_error=1:verify_asan_link_order=0"
+    env["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1"
+    return env
+
+
+def start_daemon(cfg, port, logpath):
+    f = open(logpath, "w")
+    p = subprocess.Popen([BIN, "--allow-non-root-owner", "-f", "-c", cfg],
+                         env=daemon_env(port), stdout=f,
+                         stderr=subprocess.STDOUT)
+    return p, f
+
+
+def stop_daemon(p, f, sig=signal.SIGTERM, timeout=5):
+    if p.poll() is None:
+        p.send_signal(sig)
+    try:
+        rc = p.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        rc = p.wait()
+    f.close()
+    return rc
+
+
+def wait_text(path, needle, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        txt = log_text(path)
+        if needle in txt:
+            return txt
+        time.sleep(0.05)
+    return log_text(path)
 
 
 def main():
@@ -127,6 +169,8 @@ def main():
     r = run(base + ["--check-ca", "-c", cfg], srv.port)
     txt = log_text(logfile)
     check("check-ca OK", r.returncode == 0 and "check-ca: OK" in out(r), out(r)[-400:])
+    check("check-ca reports earliest_notAfter and tls=1.2",
+          "earliest_notAfter=" in out(r) and "tls=1.2" in out(r), out(r)[-400:])
     check("check-ca sends no request bytes", "APPBYTES 0" in txt and "APPBYTES " in txt
           and all("APPBYTES 0" in l for l in txt.splitlines() if l.startswith("APPBYTES")),
           txt[:300])
@@ -285,9 +329,104 @@ def main():
           and not any(l.startswith(("GET ", "PATCH ", "POST "))
                       for l in txt.splitlines()), "out=%s log=%s" % (out(r)[-300:], txt[:300]))
 
+    # 18. daemon: boot failure must schedule the first backoff step (5 s)
+    cfg_daemon = write_conf("daemon-retry.conf",
+                            conf(ca_good, lock=os.path.join(TMP, "daemon-retry.lock")))
+    write_state({"status": 500})
+    dlog = os.path.join(TMP, "daemon-retry.log")
+    p, f = start_daemon(cfg_daemon, srv.port, dlog)
+    txt = wait_text(dlog, "retry scheduled delay_ms=5000", 2.0)
+    check("daemon boot failure schedules 5s retry", "delay_ms=5000" in txt, txt[-500:])
+    txt = wait_text(dlog, "cycle start reason=retry", 7.0)
+    check("daemon performs the scheduled retry", "cycle start reason=retry" in txt, txt[-500:])
+    rc = stop_daemon(p, f)
+    txt = log_text(dlog)
+    check("daemon SIGTERM exits 0", rc == 0 and "stop signal=15" in txt, txt[-300:])
+
+    # 19. daemon: clock guard must schedule a fixed 30 s retry after boot
+    cfg_clockd = write_conf("daemon-clock.conf",
+                            conf(ca_good, lock=os.path.join(TMP, "daemon-clock.lock"))
+                            .replace("[core]\n", "[core]\nclock_guard_epoch = 2000000000\n"))
+    dlog = os.path.join(TMP, "daemon-clock.log")
+    p, f = start_daemon(cfg_clockd, srv.port, dlog)
+    txt = wait_text(dlog, "retry scheduled delay_ms=30000 reason=clock", 2.0)
+    check("daemon clock guard schedules 30s retry", "delay_ms=30000" in txt, txt[-500:])
+    rc = stop_daemon(p, f)
+    check("clock-guard daemon exits 0 on SIGTERM", rc == 0, txt[-300:])
+
+    # 20. SIGHUP is logged and ignored; SIGTERM still exits 0
+    write_state({})
+    cfg_hup = write_conf("daemon-hup.conf",
+                         conf(ca_good, lock=os.path.join(TMP, "daemon-hup.lock")))
+    dlog = os.path.join(TMP, "daemon-hup.log")
+    p, f = start_daemon(cfg_hup, srv.port, dlog)
+    wait_text(dlog, "cycle end", 3.0)
+    p.send_signal(signal.SIGHUP)
+    time.sleep(0.4)
+    alive = p.poll() is None
+    txt = log_text(dlog)
+    check("SIGHUP ignored and logged", alive and "sighup_ignored" in txt, txt[-400:])
+    rc = stop_daemon(p, f)
+    check("SIGTERM after SIGHUP exits 0", rc == 0, txt[-300:])
+
+    # 21. 429 Retry-After: 1 must drive the next attempt, not the long backoff
+    cfg_429d = write_conf("daemon-429.conf",
+                          conf(ca_good, lock=os.path.join(TMP, "daemon-429.lock")))
+    write_state({"status": 429, "retry_after": "1"})
+    dlog = os.path.join(TMP, "daemon-429.log")
+    p, f = start_daemon(cfg_429d, srv.port, dlog)
+    txt = wait_text(dlog, "retry scheduled delay_ms=1000", 2.0)
+    check("daemon honors Retry-After=1", "delay_ms=1000" in txt, txt[-500:])
+    txt = wait_text(dlog, "cycle start reason=retry", 2.5)
+    check("daemon retries after Retry-After", "cycle start reason=retry" in txt, txt[-500:])
+    stop_daemon(p, f)
+
+    # 22. Content-Length + keep-alive: stop at the framed end, not at timeout
+    write_state({"keep_alive": True, "echo_ip": "1.1.1.1"})
+    cfg_http = write_conf("http-keepalive.conf",
+                          conf(ca_good, lock=os.path.join(TMP, "http.lock"))
+                          .replace("[core]\n",
+                                   "[core]\nhttp_timeout_ms = 3000\nconnect_timeout_ms = 1000\n"))
+    t0 = time.time()
+    r = run(base + ["--print-ip", "-c", cfg_http], srv.port, timeout=10)
+    elapsed = time.time() - t0
+    check("keep-alive Content-Length response completes early",
+          r.returncode == 0 and "ipv4=1.1.1.1" in out(r) and elapsed < 2.0,
+          "rc=%d elapsed=%.2fs out=%r" % (r.returncode, elapsed, out(r)[-800:]))
+
+    # 23. Truncated close-delimited body must be rejected (no close_notify)
+    write_state({"truncate_body": True, "echo_ip": "1.1.1.77"})
+    r = run(base + ["--print-ip", "-c", cfg_http], srv.port, timeout=10)
+    check("truncated close-delimited body rejected",
+          r.returncode == 1 and "tls_truncated" in out(r) and "ipv4=1.1.1.7 " not in out(r),
+          "rc=%d out=%r" % (r.returncode, out(r)[-800:]))
+
+    # 24. connect_timeout_ms covers the TLS handshake, not just TCP connect
+    cfg_stall = write_conf("stall.conf",
+                           conf(ca_good, lock=os.path.join(TMP, "stall.lock"))
+                           .replace("[core]\n",
+                                    "[core]\nhttp_timeout_ms = 3000\nconnect_timeout_ms = 500\n"))
+    stall = MockServer(certdir, statefile, os.path.join(TMP, "stall.log"), stall=True)
+    stall.start()
+    t0 = time.time()
+    r = run(base + ["--print-ip", "-c", cfg_stall], stall.port, timeout=10)
+    elapsed = time.time() - t0
+    stall.close()
+    check("TLS handshake respects connect_timeout",
+          r.returncode == 1 and elapsed < 2.5, "elapsed=%.2fs out=%s" % (elapsed, out(r)[-300:]))
+
+    # 25. empty CA bundle => E_CA_LOAD, not a fake TLS verification success
+    empty_ca = os.path.join(repo_ca, "empty.pem")
+    open(empty_ca, "wb").close()
+    os.chmod(empty_ca, 0o644)
+    cfg_empty = write_conf("empty-ca.conf", conf(empty_ca))
+    r = run(base + ["--check-ca", "-c", cfg_empty], srv.port)
+    check("empty CA returns E_CA_LOAD",
+          r.returncode == 1 and "E_CA_LOAD" in out(r), out(r)[-400:])
+
     srv.close()
     wrong.close()
-    for n in ("test-ca.pem", "test-ca-untrusted.pem", "test-ca-wrong.pem"):
+    for n in ("test-ca.pem", "test-ca-untrusted.pem", "test-ca-wrong.pem", "empty.pem"):
         try:
             os.unlink(os.path.join(repo_ca, n))
         except OSError:

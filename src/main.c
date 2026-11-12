@@ -89,11 +89,21 @@ static int parse_cli(int argc, char **argv, struct cli *c)
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
         int r;
-        if ((r = opt_value(argc, argv, &i, a, "--config", &c->config)) == 0) continue;
-        else if (r < 0) { fprintf(stderr, "--config needs a path\n"); return -1; }
+        if ((r = opt_value(argc, argv, &i, a, "--config", &c->config)) == 0) {
+            if (c->config[0] == '\0') {
+                fprintf(stderr, "--config needs a path\n");
+                return -1;
+            }
+            continue;
+        } else if (r < 0) { fprintf(stderr, "--config needs a path\n"); return -1; }
         if (!strcmp(a, "-c")) {
             if (i + 1 >= argc) { fprintf(stderr, "-c needs a path\n"); return -1; }
-            c->config = argv[++i]; continue;
+            c->config = argv[++i];
+            if (c->config[0] == '\0') {
+                fprintf(stderr, "-c needs a path\n");
+                return -1;
+            }
+            continue;
         }
         if ((r = opt_value(argc, argv, &i, a, "--log-level", &c->log_level)) == 0) continue;
         else if (r < 0) { fprintf(stderr, "--log-level needs a value\n"); return -1; }
@@ -135,7 +145,9 @@ static int load_config(const struct cli *cli, int diagnostic, struct mn_cfg *cfg
     size_t plen;
     mn_find_artifact_root(root, sizeof(root));
     if (mn_resolve_conf_path(cli->config, root, path, sizeof(path), perr, sizeof(perr)) != 0) {
-        if (cli->check_ca || cli->print_ip) {
+        int explicit_conf = cli->config != NULL && cli->config[0] != '\0';
+
+        if (!explicit_conf && (cli->check_ca || cli->print_ip)) {
             /* §09.6: diagnostics must work outside systemd and without a config. */
             mn_cfg_defaults(cfg, root);
             snprintf(err, errlen, "%s", perr);
@@ -232,6 +244,10 @@ static int app_cycle(struct app *a, const char *reason, int *fails)
     int rc;
     if (mn_nl_rescan(&a->nl, &a->addrs, err, sizeof(err)) != 0) {
         mn_log(MN_LOG_ERROR, "netlink rescan_failed err=E_CFG detail=\"%s\"", err);
+        if (fails) *fails = 1;
+        a->ctx.last_errcode = E_CFG;
+        a->ctx.last_http_status = -1;
+        a->ctx.last_retry_after = -1;
         return -1;
     }
     a->ctx.addrs = &a->addrs;
@@ -285,8 +301,12 @@ static int do_check_ca(struct app *a, int no_config)
     if (no_config) mn_log(MN_LOG_WARN, "no_config hint=using_default_endpoints");
     {
         size_t n = 0;
+        char earliest[16] = "(unknown)";
         mn_ca_current(&a->ca, &n);
-        printf("check-ca: ca path=%s anchors=%zu\n", capath, n);
+        if (a->ca.info.earliest_valid)
+            mn_ca_format_date(a->ca.info.earliest_days, earliest, sizeof(earliest));
+        printf("check-ca: ca path=%s anchors=%zu earliest_notAfter=%s\n",
+               capath, n, earliest);
     }
     snprintf(hosts[n_hosts++], 128, "%s", MN_CF_API_HOST);
     snprintf(urlbuf, sizeof(urlbuf), "%s", a->cfg.detect.ipv4_echo_url);
@@ -304,11 +324,12 @@ static int do_check_ca(struct app *a, int no_config)
         p = comma + 1;
     }
     for (i = 0; i < n_hosts; i++) {
-        int ec = 0;
+        int ec = 0, tls_version = 0;
         cipher[0] = '\0';
         if (mn_tls_handshake(&a->cfg, &a->ca, hosts[i], 443, cipher, sizeof(cipher),
-                             &ec, err, sizeof(err)) == 0) {
-            printf("check-ca: OK tls=1.2 cipher=%s host=%s\n",
+                             &tls_version, &ec, err, sizeof(err)) == 0) {
+            printf("check-ca: OK tls=%s cipher=%s host=%s\n",
+                   mn_tls_version_name(tls_version),
                    cipher[0] ? cipher : "unknown", hosts[i]);
         } else {
             printf("check-ca: FAIL host=%s err=%s detail=\"%s\"\n", hosts[i], mn_err_name(ec), err);
@@ -316,6 +337,44 @@ static int do_check_ca(struct app *a, int no_config)
         }
     }
     return failures ? 1 : 0;
+}
+
+static void schedule_next(struct app *a, int fail, int64_t now,
+                          size_t *backoff_idx, int64_t *retry_due,
+                          int *retry_active)
+{
+    if (a->ctx.clock_guard) {
+        /* §05.6: fixed 30 s, no backoff consumption, no writes. */
+        *retry_due = now + 30000;
+        *retry_active = 1;
+        mn_log(MN_LOG_INFO, "retry scheduled delay_ms=30000 reason=clock");
+        return;
+    }
+    if (fail > 0) {
+        int status = a->ctx.last_http_status;
+        int ra = a->ctx.last_retry_after;
+        int ec = a->ctx.last_errcode;
+        int64_t delay;
+
+        if (status < 0 || ra < 0) {
+            int s2, r2;
+            mn_http_last_meta(&s2, &r2);
+            if (status < 0) status = s2;
+            if (ra < 0) ra = r2;
+        }
+        /* Use the current backoff step, then advance for the next failure. */
+        delay = mn_backoff_take(a->cfg.core.retry_backoff,
+                                a->cfg.core.n_backoff, backoff_idx,
+                                a->cfg.core.interval_fallback, ec, status, ra);
+        *retry_due = now + delay;
+        *retry_active = 1;
+        mn_log(MN_LOG_INFO, "retry scheduled delay_ms=%lld status=%d retry_after=%d",
+               (long long)delay, status, ra);
+        return;
+    }
+    *backoff_idx = 0;
+    *retry_active = 0;
+    *retry_due = INT64_MAX;
 }
 
 static int do_daemon(struct app *a, int once, int dry_run)
@@ -330,6 +389,7 @@ static int do_daemon(struct app *a, int once, int dry_run)
     int retry_active = 0, rc = 0, fail = 0;
     int exit_code = 0;
 
+    (void)dry_run;
     memset(&deb, 0, sizeof(deb));
     if (mn_nl_open(&a->nl, err, sizeof(err)) != 0) {
         mn_log(MN_LOG_ERROR, "netlink_open_failed err=E_CFG detail=\"%s\"", err);
@@ -342,18 +402,22 @@ static int do_daemon(struct app *a, int once, int dry_run)
     }
     /* mn_nl_open() already logs `netlink subscribed ... initial_addrs=N`. */
 
-    rc = app_cycle(a, "boot", &fail);
-    if (rc < 0) return 1;
     if (once) {
-        exit_code = (fail > 0) ? 1 : 0;
-        return exit_code;
+        rc = app_cycle(a, "boot", &fail);
+        if (rc < 0) return 1;
+        return fail > 0 ? 1 : 0;
     }
 
+    /* §05.1: install signals before the boot cycle so startup is not
+       terminated by the default SIGTERM/SIGINT actions. */
     sigemptyset(&mask);
     sigaddset(&mask, SIGTERM);
     sigaddset(&mask, SIGINT);
-    sigaddset(&mask, SIGHUP);
-    sigprocmask(SIG_BLOCK, &mask, NULL);
+    sigaddset(&mask, SIGHUP);   /* drained and ignored, never exits */
+    if (sigprocmask(SIG_BLOCK, &mask, NULL) != 0) {
+        mn_log(MN_LOG_ERROR, "sigprocmask_failed errno=%d", errno);
+        return 1;
+    }
     sigfd = signalfd(-1, &mask, SFD_CLOEXEC | SFD_NONBLOCK);
     tfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
     if (sigfd < 0 || tfd < 0) {
@@ -364,6 +428,14 @@ static int do_daemon(struct app *a, int once, int dry_run)
     }
     if (a->cfg.core.interval_fallback > 0)
         fallback_due = mn_now_ms() + (int64_t)a->cfg.core.interval_fallback * 1000;
+
+    rc = app_cycle(a, "boot", &fail);
+    if (rc < 0) {
+        close(sigfd);
+        close(tfd);
+        return 1;
+    }
+    schedule_next(a, fail, mn_now_ms(), &backoff_idx, &retry_due, &retry_active);
 
     fds[0].fd = mn_nl_fd(&a->nl); fds[0].events = POLLIN;
     fds[1].fd = tfd;             fds[1].events = POLLIN;
@@ -378,34 +450,91 @@ static int do_daemon(struct app *a, int once, int dry_run)
                       fallback_due);
         set_timer(tfd, due);
         rc = ppoll(fds, 3, NULL, NULL);
-        if (rc < 0) { if (errno == EINTR) continue; mn_log(MN_LOG_ERROR, "ppoll_failed errno=%d", errno); break; }
-        if (fds[2].revents & POLLIN) {
-            struct signalfd_siginfo si;
-            ssize_t n = read(sigfd, &si, sizeof(si));
-            (void)n;
-            mn_log(MN_LOG_INFO, "stop signal=%d exiting=0", n > 0 ? (int)si.ssi_signo : 0);
+        if (rc < 0) {
+            if (errno == EINTR) continue;
+            mn_log(MN_LOG_ERROR, "ppoll_failed errno=%d", errno);
+            exit_code = 1;
             break;
         }
+        if (rc == 0) continue;
+
+        if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            mn_log(MN_LOG_ERROR, "netlink_poll_failed revents=0x%x", fds[0].revents);
+            exit_code = 1;
+            break;
+        }
+        if (fds[1].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            mn_log(MN_LOG_ERROR, "timerfd_poll_failed revents=0x%x", fds[1].revents);
+            exit_code = 1;
+            break;
+        }
+        if (fds[2].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            mn_log(MN_LOG_ERROR, "signalfd_poll_failed revents=0x%x", fds[2].revents);
+            exit_code = 1;
+            break;
+        }
+
+        if (fds[2].revents & POLLIN) {
+            struct signalfd_siginfo si;
+            ssize_t n;
+
+            do {
+                n = read(sigfd, &si, sizeof(si));
+            } while (n < 0 && errno == EINTR);
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                mn_log(MN_LOG_ERROR, "signalfd_read_failed errno=%d", errno);
+                exit_code = 1;
+                break;
+            }
+            if (n != (ssize_t)sizeof(si)) {
+                mn_log(MN_LOG_ERROR, "signalfd_short_read bytes=%ld", (long)n);
+                exit_code = 1;
+                break;
+            }
+            if (si.ssi_signo == SIGHUP) {
+                /* §05.1 only defines SIGTERM/SIGINT as exit signals. */
+                mn_log(MN_LOG_WARN, "sighup_ignored hint=no_reload");
+                continue;
+            }
+            mn_log(MN_LOG_INFO, "stop signal=%d exiting=0", (int)si.ssi_signo);
+            break;
+        }
+
         if (fds[0].revents & POLLIN) {
-            int overflow = 0, interesting = mn_nl_drain(&a->nl, &overflow, err, sizeof(err));
+            int overflow = 0, drained;
+
+            drained = mn_nl_drain(&a->nl, &overflow, err, sizeof(err));
+            if (drained < 0) {
+                mn_log(MN_LOG_ERROR, "netlink_drain_failed err=E_CFG detail=\"%s\"", err);
+                exit_code = 1;
+                break;
+            }
             if (overflow) {
-                mn_log(MN_LOG_WARN, "netlink overflow resync=full_dump pending_cleared=1");
                 mn_debounce_clear(&deb);
-                if (mn_nl_rescan(&a->nl, &a->addrs, err, sizeof(err)) == 0)
-                    mn_log(MN_LOG_DEBUG, "netlink resync_done addrs=%zu", a->addrs.n);
                 rc = app_cycle(a, "event", &fail);
-            } else if (interesting > 0) {
+            } else if (drained > 0) {
                 mn_debounce_event(&deb, mn_now_ms(), a->cfg.core.debounce_ms,
                                   10 * a->cfg.core.debounce_ms);
                 continue;
+            } else {
+                continue;
             }
-            if (!overflow) continue;
         }
         if (fds[1].revents & POLLIN) {
             uint64_t expiries;
-            ssize_t n = read(tfd, &expiries, sizeof(expiries));
+            ssize_t n;
             const char *reason = NULL;
-            (void)n;
+
+            do {
+                n = read(tfd, &expiries, sizeof(expiries));
+            } while (n < 0 && errno == EINTR);
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+                mn_log(MN_LOG_ERROR, "timerfd_read_failed errno=%d", errno);
+                exit_code = 1;
+                break;
+            }
             now = mn_now_ms();
             if (mn_debounce_due(&deb, now)) { reason = "event"; mn_debounce_clear(&deb); }
             else if (retry_active && now >= retry_due) { reason = "retry"; retry_active = 0; }
@@ -417,40 +546,10 @@ static int do_daemon(struct app *a, int once, int dry_run)
             }
             if (!reason) continue;
             rc = app_cycle(a, reason, &fail);
-        } else if (fds[0].revents & POLLIN && rc >= 0) {
-            /* overflow-triggered cycle already ran above */
         }
-        if (rc < 0) { rc = 1; }
 
-        now = mn_now_ms();
-        if (a->ctx.clock_guard) {
-            /* §05.6: fixed 30 s, no backoff consumption, no writes */
-            retry_due = now + 30000;
-            retry_active = 1;
-            continue;
-        }
-        if (fail > 0) {
-            int status = a->ctx.last_http_status;
-            int ra = a->ctx.last_retry_after;
-            int ec = a->ctx.last_errcode;
-            if (status < 0 || ra < 0) {
-                int s2, r2;
-                mn_http_last_meta(&s2, &r2);
-                if (status < 0) status = s2;
-                if (ra < 0) ra = r2;
-            }
-            backoff_idx = mn_backoff_next(backoff_idx, a->cfg.core.n_backoff);
-            retry_due = now + mn_backoff_delay_ms(a->cfg.core.retry_backoff,
-                          a->cfg.core.n_backoff, backoff_idx,
-                          a->cfg.core.interval_fallback, ec, status, ra);
-            retry_active = 1;
-            mn_log(MN_LOG_INFO, "retry scheduled delay_ms=%lld status=%d retry_after=%d",
-                   (long long)(retry_due - now), status, ra);
-        } else {
-            backoff_idx = 0;
-            retry_active = 0;
-            retry_due = INT64_MAX;
-        }
+        if (rc < 0) rc = 1;
+        schedule_next(a, fail, mn_now_ms(), &backoff_idx, &retry_due, &retry_active);
     }
     close(sigfd);
     close(tfd);
@@ -489,7 +588,9 @@ int main(int argc, char **argv)
         mn_log(MN_LOG_ERROR, "config_failed err=E_CFG detail=\"%s\"", err);
         /* §11: --check-config validation failure = 1; --once config error = 2;
            daemon startup failure = 1 (§05.1). */
-        return cli.check_config ? 1 : (cli.once ? 2 : 1);
+        return cli.check_config ? 1
+             : (cli.once || cli.dry_run || cli.print_ip || cli.check_ca) ? 2
+             : 1;
     }
     a.cfg.allow_non_root_owner = cli.allow_non_root_owner;
     mn_log_init(a.cfg.core.log_level, a.cfg.core.log_target,

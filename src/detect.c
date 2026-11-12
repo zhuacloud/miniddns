@@ -278,7 +278,7 @@ int mn_iface_allowed(const char *name, const char *include,
 static void det_log_v4_success(const struct mn_detect_result *res,
                                const char *source)
 {
-    mn_log(MN_LOG_INFO, "detect family=inet4 source=%s ip=%s candidates=%d",
+    mn_log(MN_LOG_DEBUG, "detect family=inet4 source=%s ip=%s candidates=%d",
            source, res->ip, res->candidates);
 }
 
@@ -365,7 +365,7 @@ static int det_v4_external(const struct mn_cfg *cfg, struct mn_ca *ca,
                            char *transport_err, size_t transport_cap)
 {
     const char *cur = cfg->detect.ipv4_echo_url;
-    char url[MN_PATH_MAX];
+    char url[1024];
     char host[MN_FQDN_MAX];
     char path[MN_PATH_MAX];
     char parse_err[256];
@@ -587,7 +587,7 @@ int mn_detect_ipv6(const struct mn_cfg *cfg,
         return E_CFG;
     }
     res->source = 1;
-    mn_log(MN_LOG_INFO, "detect family=inet6 source=iface ip=%s candidates=%d",
+    mn_log(MN_LOG_DEBUG, "detect family=inet6 source=iface ip=%s candidates=%d",
            res->ip, res->candidates);
     return MN_OK;
 }

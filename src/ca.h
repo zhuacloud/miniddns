@@ -37,6 +37,9 @@ int mn_ca_refresh(struct mn_ca *ca);
 const br_x509_trust_anchor *mn_ca_current(struct mn_ca *ca, size_t *n);
 void mn_ca_free(struct mn_ca *ca);
 
+/* Format days-since-1970 as YYYY-MM-DD (UTC). */
+int  mn_ca_format_date(uint32_t days, char *out, size_t cap);
+
 /* Exposed for unit tests: parse a PEM buffer. Caller frees *arena. */
 int mn_ca_parse_bundle(const char *buf, size_t len,
                        br_x509_trust_anchor **anchors, size_t *n_anchors,

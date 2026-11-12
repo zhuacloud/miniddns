@@ -4,6 +4,8 @@
 
 #include "miniddns.h"
 
+struct nlmsghdr;
+
 struct mn_addr {
     int      family;                /* AF_INET | AF_INET6 */
     uint8_t  bytes[16];             /* network order, v4 in first 4 */
@@ -42,5 +44,10 @@ int  mn_nl_rescan(struct mn_nl *nl, struct mn_addr_set *out,
 /* Drain pending netlink messages (non-blocking). *overflow=1 on ENOBUFS.
    Returns 1 when at least one interesting event was seen. */
 int  mn_nl_drain(struct mn_nl *nl, int *overflow, char *err, size_t errlen);
+
+/* Exposed for unit tests (§14.1). */
+int  mn_nl_decode_addr(struct mn_nl *nl, const struct nlmsghdr *nh, struct mn_addr *a);
+/* Classify a recvmsg() errno other than EINTR: 1 = stop, -1 = hard error. */
+int  mn_nl_recv_error(int errnum, int *overflow, char *err, size_t errlen);
 
 #endif /* MN_NL_ADDR_H */

@@ -40,7 +40,10 @@ int mn_http_request(const struct mn_cfg *cfg, struct mn_ca *ca,
 /* TLS handshake only, zero application bytes (§09.6 --check-ca) */
 int mn_tls_handshake(const struct mn_cfg *cfg, struct mn_ca *ca,
                      const char *host, int port, char *cipher, size_t ciphercap,
-                     int *errcode, char *err, size_t errlen);
+                     int *tls_version, int *errcode, char *err, size_t errlen);
+
+/* Human-readable name for a BearSSL protocol version (e.g. "1.2"). */
+const char *mn_tls_version_name(int version);
 
 /* Pure response parser for unit tests: status line, headers, Content-Length,
    chunked, limits, Retry-After. Returns 0 or E_PARSE with reason in err. */
