@@ -20,7 +20,7 @@ usage: install.sh [options]
   --sysconfdir DIR    config dir (default /etc/miniddns)
   --systemd-dir DIR   systemd unit dir (default /etc/systemd/system)
   --link-bin          symlink /usr/local/bin/miniddns -> <bindir>/miniddns
-  --no-systemd        do not daemon-reload / verify (for tests, containers)
+  --no-systemd        do not install/reload/verify the systemd unit (tests, containers)
   -h, --help          this help
 EOF
 }
@@ -87,19 +87,36 @@ if [ -f "$ROOT/doc/design.html" ]; then
 fi
 if [ -f "$ROOT/THIRD_PARTY_NOTICES.md" ]; then
     install -Dm0644 "$ROOT/THIRD_PARTY_NOTICES.md" "$PREFIX/THIRD_PARTY_NOTICES.md"
+    install -Dm0644 "$ROOT/THIRD_PARTY_NOTICES.md" "$PREFIX/LICENSES/THIRD_PARTY_NOTICES.md"
+fi
+if [ -f "$ROOT/LICENSE" ]; then
+    install -Dm0644 "$ROOT/LICENSE" "$PREFIX/LICENSES/miniddns-MIT.txt"
+fi
+if [ -f "$ROOT/third_party/bearssl/LICENSE.txt" ]; then
+    install -Dm0644 "$ROOT/third_party/bearssl/LICENSE.txt" "$PREFIX/LICENSES/bearssl-MIT.txt"
+fi
+if [ -f "$ROOT/third_party/jsmn/LICENSE" ]; then
+    install -Dm0644 "$ROOT/third_party/jsmn/LICENSE" "$PREFIX/LICENSES/jsmn-MIT.txt"
+fi
+if [ -d "$ROOT/LICENSES" ]; then
+    mkdir -p "$PREFIX/LICENSES"
+    cp -R "$ROOT/LICENSES/." "$PREFIX/LICENSES/"
+    chmod -R u+rwX,go+rX,go-w "$PREFIX/LICENSES"
 fi
 
 # 3. Generate the unit from the template with the chosen paths.
-if [ -f "$ROOT/systemd/miniddns.service.in" ]; then
-    install -Dd "$SYSTEMD_DIR"
-    sed -e "s|@BINDIR@|$BINDIR|g" \
-        -e "s|@CONFDIR@|$SYSCONFDIR|g" \
-        -e "s|@DOCDIR@|$DOCDIR|g" \
-        "$ROOT/systemd/miniddns.service.in" > "$SYSTEMD_DIR/miniddns.service.tmp"
-    chmod 0644 "$SYSTEMD_DIR/miniddns.service.tmp"
-    mv -f "$SYSTEMD_DIR/miniddns.service.tmp" "$SYSTEMD_DIR/miniddns.service"
-elif [ -f "$ROOT/systemd/miniddns.service" ]; then
-    install -Dm0644 "$ROOT/systemd/miniddns.service" "$SYSTEMD_DIR/miniddns.service"
+if [ "$NO_SYSTEMD" -eq 0 ]; then
+    if [ -f "$ROOT/systemd/miniddns.service.in" ]; then
+        install -Dd "$SYSTEMD_DIR"
+        sed -e "s|@BINDIR@|$BINDIR|g" \
+            -e "s|@CONFDIR@|$SYSCONFDIR|g" \
+            -e "s|@DOCDIR@|$DOCDIR|g" \
+            "$ROOT/systemd/miniddns.service.in" > "$SYSTEMD_DIR/miniddns.service.tmp"
+        chmod 0644 "$SYSTEMD_DIR/miniddns.service.tmp"
+        mv -f "$SYSTEMD_DIR/miniddns.service.tmp" "$SYSTEMD_DIR/miniddns.service"
+    elif [ -f "$ROOT/systemd/miniddns.service" ]; then
+        install -Dm0644 "$ROOT/systemd/miniddns.service" "$SYSTEMD_DIR/miniddns.service"
+    fi
 fi
 # NOTE: user-nonroot.conf is deliberately NOT installed (§12.3).
 
@@ -119,7 +136,9 @@ echo "  config  : $PREFIX/conf/miniddns.conf.example (copy to $SYSCONFDIR/minidd
 echo "  examples: $PREFIX/examples/ (config and service configuration examples)"
 echo "  ca      : $PREFIX/ca/ca-certificates.crt"
 echo "  docs    : $DOCDIR/design.md"
-echo "  unit    : $SYSTEMD_DIR/miniddns.service"
+if [ "$NO_SYSTEMD" -eq 0 ]; then
+    echo "  unit    : $SYSTEMD_DIR/miniddns.service"
+fi
 echo ""
 echo "next steps:"
 echo "  1) mkdir -p $SYSCONFDIR && cp $PREFIX/conf/miniddns.conf.example $SYSCONFDIR/miniddns.conf"
@@ -127,7 +146,11 @@ echo "  2) write your API token to $SYSCONFDIR/cloudflare.token and chmod 600"
 echo "     (install.sh never creates or overwrites token files)"
 echo "  3) $BINDIR/miniddns --check-config -c $SYSCONFDIR/miniddns.conf"
 echo "     $BINDIR/miniddns --check-ca -c $SYSCONFDIR/miniddns.conf"
-echo "  4) systemctl daemon-reload && systemctl enable --now miniddns"
+if [ "$NO_SYSTEMD" -eq 0 ]; then
+    echo "  4) systemctl daemon-reload && systemctl enable --now miniddns"
+else
+    echo "  4) start $BINDIR/miniddns --foreground manually (systemd unit not installed)"
+fi
 echo ""
 if [ ! -f "$SYSCONFDIR/miniddns.conf" ]; then
     echo "WARN: $SYSCONFDIR/miniddns.conf does not exist yet — the service will fail with E_CFG until step 1 is done." >&2
@@ -135,12 +158,16 @@ fi
 echo "NOTE: install.sh does NOT enable/start the service (config is not filled yet)."
 
 if [ "$NO_SYSTEMD" -eq 0 ]; then
+    TIMEOUT=""
+    if command -v timeout >/dev/null 2>&1; then
+        TIMEOUT="timeout -k 2 10"
+    fi
     if command -v systemd-analyze >/dev/null 2>&1; then
-        systemd-analyze verify "$SYSTEMD_DIR/miniddns.service" >/dev/null 2>&1 \
+        $TIMEOUT systemd-analyze verify "$SYSTEMD_DIR/miniddns.service" >/dev/null 2>&1 \
             || echo "WARN: systemd-analyze verify reported issues (non-fatal)" >&2
     fi
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl daemon-reload >/dev/null 2>&1 \
+        $TIMEOUT systemctl daemon-reload >/dev/null 2>&1 \
             || echo "WARN: systemctl daemon-reload failed (non-fatal)" >&2
     fi
 fi

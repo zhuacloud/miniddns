@@ -16,6 +16,9 @@ import struct
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from verify_ca_bundle import check_bundle  # noqa: E402
+
 REQUIRED_FILES = [
     "bin/miniddns",
     "README.md",
@@ -26,6 +29,7 @@ REQUIRED_FILES = [
     "systemd/miniddns.service.in",
     "systemd/miniddns.service.d/user-nonroot.conf",
     "openwrt/Makefile",
+    "openwrt/README.md",
     "openwrt/files/miniddns.init",
     "examples/README.md",
     "examples/miniddns.conf.minimal.example",
@@ -55,6 +59,14 @@ EXECUTABLE_FILES = [
     "install.sh",
     "openwrt/files/miniddns.init",
 ]
+
+ARCH_ELF = {
+    "x86": (1, 3),      # ELFCLASS32, EM_386
+    "x64": (2, 62),     # ELFCLASS64, EM_X86_64
+    "arm32": (1, 40),   # ELFCLASS32, EM_ARM
+    "arm64": (2, 183),  # ELFCLASS64, EM_AARCH64
+}
+MUSL_STATIC_MAX = 500 * 1024
 
 HOST_ARCH = {
     "x86_64": "x64", "amd64": "x64",
@@ -90,6 +102,23 @@ def has_interp(path):
             if struct.unpack_from(endian + "I", data, off)[0] == 3:  # PT_INTERP
                 return True
         return False
+    except (OSError, struct.error):
+        return None
+
+
+def elf_identity(path):
+    """Return (elf_class, e_machine, e_type, little_endian) or None."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read(64)
+        if data[:4] != b"\x7fELF" or len(data) < 20:
+            return None
+        elf_class = data[4]
+        little = data[5] == 1
+        endian = "<" if little else ">"
+        e_type = struct.unpack_from(endian + "H", data, 16)[0]
+        e_machine = struct.unpack_from(endian + "H", data, 18)[0]
+        return elf_class, e_machine, e_type, little
     except (OSError, struct.error):
         return None
 
@@ -145,12 +174,31 @@ def main():
     binary = os.path.join(root, "bin/miniddns")
     if os.path.isfile(binary):
         interp = has_interp(binary)
-        if interp is None:
+        ident = elf_identity(binary)
+        if interp is None or ident is None:
             problems.append("bin/miniddns is not a valid ELF binary")
-        elif args.libc == "musl" and interp:
-            problems.append("musl build must be fully static (PT_INTERP present)")
-        elif args.libc == "glibc" and not interp:
-            problems.append("glibc build must be dynamically linked (no PT_INTERP)")
+        else:
+            elf_class, e_machine, e_type, little = ident
+            expected = ARCH_ELF.get(args.arch)
+            if expected is None:
+                problems.append("unknown --arch %s" % args.arch)
+            elif (elf_class, e_machine) != expected:
+                problems.append(
+                    "ELF arch mismatch for %s: class=%d machine=%d (expected class=%d machine=%d)"
+                    % (args.arch, elf_class, e_machine, expected[0], expected[1]))
+            if not little:
+                problems.append("ELF binary is not little-endian")
+            if args.libc == "musl":
+                if interp:
+                    problems.append("musl build must be fully static (PT_INTERP present)")
+                if e_type != 2:  # ET_EXEC
+                    problems.append("musl static build must be ET_EXEC (got e_type=%d)" % e_type)
+                size = os.path.getsize(binary)
+                if size > MUSL_STATIC_MAX:
+                    problems.append("musl static binary exceeds 500 KiB budget: %d bytes"
+                                    % size)
+            elif args.libc == "glibc" and not interp:
+                problems.append("glibc build must be dynamically linked (no PT_INTERP)")
 
         host = HOST_ARCH.get(platform.machine().lower(), "")
         runnable = (not args.skip_run) and host == args.arch
@@ -170,6 +218,25 @@ def main():
             if args.version.encode() not in blob:
                 problems.append("version string %r not found in cross-built binary"
                                 % args.version)
+
+    # CA fallback bundle must be plausible and match its provenance README.
+    ca_bundle = os.path.join(root, "ca/ca-certificates.crt")
+    ca_readme = os.path.join(root, "ca/README")
+    if os.path.isfile(ca_bundle) and os.path.isfile(ca_readme):
+        for p in check_bundle(ca_bundle, ca_readme, 100):
+            problems.append("CA gate: %s" % p)
+
+    # Artifact files must not be group/world writable.
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in dirnames + filenames:
+            full = os.path.join(dirpath, name)
+            try:
+                mode = os.stat(full).st_mode
+            except OSError:
+                continue
+            if mode & 0o022:
+                problems.append("group/world writable artifact entry: %s"
+                                % os.path.relpath(full, root))
 
     sums_path = os.path.join(root, "SHA256SUMS")
     if os.path.isfile(sums_path):

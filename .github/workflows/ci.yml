@@ -37,16 +37,21 @@ jobs:
       - name: Build
         run: make -j"$(nproc)"
 
-      - name: Specification and unit-file checks
+      - name: Specification, unit-file and config checks
         run: |
           make spec-check
           make verify-units
+          make check-config
+          make source-dist VERSION=0.0.0-ci
 
       - name: Unit and integration tests
         run: make test
 
       - name: Sanitizer build and tests
         run: make test-asan
+
+      - name: Short soak/resource gate
+        run: make soak SOAK_SECONDS=60 SOAK_INTERVAL=2
 
       - name: Verify release artifacts for both libc variants
         run: |

@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   release:
-    name: Tag, build 8 packages, changelog and publish
+    name: Test, build 8 packages + source, changelog, tag and publish
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -73,24 +73,55 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Create and push tag
-        if: ${{ inputs.dry_run == false }}
+      # Everything below must succeed before a tag is created.  A failed build
+      # therefore never leaves an orphan tag.
+      - name: Build, test and sanitize
         run: |
           set -euo pipefail
-          git tag -a "${VERSION}" -m "Release ${VERSION}" HEAD
-          git push origin "refs/tags/${VERSION}"
-          echo "Created tag ${VERSION}"
-
-      - name: Build, test and package all platforms
-        run: |
-          set -euo pipefail
-          ZIG="${RUNNER_TEMP}/zig/zig"
           make -j"$(nproc)"
           make spec-check
           make verify-units
           make test
           make test-asan
+
+      - name: Generate changelog, source tarball and OpenWrt metadata
+        run: |
+          set -euo pipefail
           mkdir -p release-assets
+          python3 scripts/gen_changelog.py \
+            --version "${VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --changelog CHANGELOG.md \
+            --notes release-assets/RELEASE_NOTES.md
+          make source-dist VERSION="${VERSION}"
+          make openwrt-metadata VERSION="${VERSION}"
+          src="dist/miniddns-${VERSION}-src.tar.gz"
+          want="$(sha256sum "${src}" | cut -d' ' -f1)"
+          have="$(grep '^PKG_HASH:=' openwrt/Makefile | cut -d= -f2)"
+          if [[ "${want}" != "${have}" ]]; then
+            echo "::error::OpenWrt PKG_HASH mismatch: source=${want} recipe=${have}"
+            exit 1
+          fi
+          # The source tarball excludes openwrt/, so rebuilding it after the
+          # metadata commit must produce the same bytes.
+          make source-dist VERSION="${VERSION}"
+          want2="$(sha256sum "${src}" | cut -d' ' -f1)"
+          if [[ "${want}" != "${want2}" ]]; then
+            echo "::error::source tarball is not deterministic: ${want} != ${want2}"
+            exit 1
+          fi
+          if [[ "${DRY_RUN}" == "false" ]]; then
+            if ! git diff --quiet -- CHANGELOG.md openwrt/Makefile; then
+              git add CHANGELOG.md openwrt/Makefile
+              git commit -m "chore(release): update changelog and OpenWrt metadata for ${VERSION}"
+              git push origin HEAD:main
+            fi
+          fi
+
+      - name: Build and package all platforms
+        run: |
+          set -euo pipefail
+          ZIG="${RUNNER_TEMP}/zig/zig"
           PLATFORMS="
             x86:x86-linux-musl:musl
             x86:x86-linux-gnu:glibc
@@ -113,25 +144,18 @@ jobs:
             tar -czf "release-assets/${id}.tar.gz" -C dist "${id}"
             echo "::endgroup::"
           done
+          cp "dist/miniddns-${VERSION}-src.tar.gz" "release-assets/miniddns-${VERSION}-src.tar.gz"
           (cd release-assets && sha256sum *.tar.gz > SHA256SUMS)
           echo "Built packages:"
           ls -1 release-assets
 
-      - name: Generate changelog and release notes
+      - name: Create and push tag
+        if: ${{ inputs.dry_run == false }}
         run: |
           set -euo pipefail
-          python3 scripts/gen_changelog.py \
-            --version "${VERSION}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --changelog CHANGELOG.md \
-            --notes build/RELEASE_NOTES.md
-          if [[ "${DRY_RUN}" == "false" ]]; then
-            if ! git diff --quiet -- CHANGELOG.md; then
-              git add CHANGELOG.md
-              git commit -m "chore(release): update changelog for ${VERSION}"
-              git push origin HEAD:main
-            fi
-          fi
+          git tag -a "${VERSION}" -m "Release ${VERSION}" HEAD
+          git push origin "refs/tags/${VERSION}"
+          echo "Created tag ${VERSION} at $(git rev-parse --short HEAD)"
 
       # Only the tarballs and the aggregate checksum file are published.
       # install.sh, configuration examples and service configuration examples
@@ -140,7 +164,8 @@ jobs:
         if: ${{ inputs.dry_run == false }}
         run: |
           set -euo pipefail
-          args=(--verify-tag --title "miniddns ${VERSION}" --notes-file build/RELEASE_NOTES.md)
+          args=(--verify-tag --title "miniddns ${VERSION}" \
+                --notes-file release-assets/RELEASE_NOTES.md)
           # Stable releases become "latest" automatically; only RC needs a flag.
           if [[ "${{ steps.validate.outputs.prerelease }}" == "true" ]]; then
             args+=(--prerelease)
@@ -148,7 +173,7 @@ jobs:
           gh release create "${VERSION}" "${args[@]}" \
             release-assets/*.tar.gz \
             release-assets/SHA256SUMS
-          echo "Published release ${VERSION} with 8 platform packages"
+          echo "Published release ${VERSION} with 8 platform packages + source tarball"
 
       - name: Dry-run summary
         if: ${{ inputs.dry_run == true }}
@@ -162,7 +187,7 @@ jobs:
             echo ""
             ls -1 release-assets/*.tar.gz
             echo ""
-            cat build/RELEASE_NOTES.md
+            cat release-assets/RELEASE_NOTES.md
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Release summary
@@ -173,6 +198,6 @@ jobs:
             echo ""
             echo "- Tag: \`${VERSION}\`"
             echo "- Prerelease: ${{ steps.validate.outputs.prerelease }}"
-            echo "- Packages: 8 tarballs (x86/x64/arm32/arm64 x musl/glibc) + SHA256SUMS"
+            echo "- Packages: 8 binary tarballs + source tarball + SHA256SUMS"
             echo "- All installation and configuration files are inside each tarball"
           } >> "${GITHUB_STEP_SUMMARY}"

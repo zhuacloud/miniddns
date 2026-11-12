@@ -137,8 +137,9 @@ def notes_text(version, date, buckets, notes_link, repo, release_type):
         "- `miniddns-%s-<arch>-musl.tar.gz` — static binary, configuration example, "
         "install script, systemd/OpenWrt service configuration examples, CA snapshot, "
         "documentation and license notices." % version,
-        "- `SHA256SUMS` and `*.tar.gz.sha256` — checksums for verification.",
-        "- `RELEASE_NOTES.md` — this file.",
+        "- `miniddns-%s-src.tar.gz` — deterministic source tarball for the "
+        "OpenWrt `PKG_SOURCE` recipe." % version,
+        "- `SHA256SUMS` — sha256 for every uploaded tarball.",
         "",
     ]
     return "\n".join(lines)
@@ -180,7 +181,7 @@ def main():
     ap.add_argument("--version", required=True, help="X.Y.Z or X.Y.Z-rcN")
     ap.add_argument("--validate-only", action="store_true", help="only validate the version")
     ap.add_argument("--changelog", default="CHANGELOG.md")
-    ap.add_argument("--notes", default="build/RELEASE_NOTES.md")
+    ap.add_argument("--notes", default="release-assets/RELEASE_NOTES.md")
     ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", "zhuacloud/miniddns"))
     ap.add_argument("--upto", default=None, help="git ref to generate notes up to (default: tag or HEAD)")
     ap.add_argument("--date", default=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"))
