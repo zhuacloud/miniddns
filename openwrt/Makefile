@@ -4,7 +4,7 @@ PKG_NAME:=miniddns
 # Overridden by scripts/update_openwrt.py on release.  OpenWrt requires a
 # numeric version; local development uses 0.0.0 (the binary still reports
 # 0.0.0-dev unless VERSION is passed explicitly by Build/Compile).
-PKG_VERSION?=0.0.0
+PKG_VERSION?=0.0.1-rc2
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_LICENSE_FILES:=LICENSE
@@ -14,7 +14,7 @@ PKG_LICENSE_FILES:=LICENSE
 # so this recipe's PKG_HASH does not depend on itself.
 PKG_SOURCE:=miniddns-$(PKG_VERSION)-src.tar.gz
 PKG_SOURCE_URL:=https://github.com/zhuacloud/miniddns/releases/download/$(PKG_VERSION)
-PKG_HASH:=skip
+PKG_HASH:=ecef88672f35aa03076b7e49dbb31d1f32492c22eecbff237f942ea77639ba87
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
 PKG_BUILD_PARALLEL:=1
 

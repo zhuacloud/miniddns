@@ -31,6 +31,25 @@
 
 <!-- generated-release-sections -->
 
+## [0.0.1-rc2] - 2026-11-12
+
+**Full Changelog**: https://github.com/zhuacloud/miniddns/compare/0.0.1-rc1...0.0.1-rc2
+
+### Fixed
+
+- fix: resolve daemon, TLS/HTTP, config and logging audit findings (3542340)
+
+### Documentation
+
+- docs: document audit fixes and release process changes (6a30159)
+
+### Internal
+
+- build: enforce release gates and add OpenWrt source package (65e95e7)
+- build: use 0.0.0-dev for local builds and separate version namespaces (19e1712)
+- chore(release): update changelog for 0.0.1-rc1 (0cf6e49)
+
+
 ## [0.0.1-rc1] - 2026-11-11
 
 ### Added
