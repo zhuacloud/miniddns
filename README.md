@@ -65,14 +65,17 @@ miniddns instead:
 
 ```bash
 make                 # dynamic build (development / self-test)
-make static          # static artifact; override the toolchain with STATIC_CC=<musl-gcc> for the ≤500 KB budget
+make static          # static artifact; requires musl-gcc or ZIG_TARGET (≤500 KB budget)
 make test            # unit tests + TLS mock integration tests
-make test-asan       # unit tests under ASan/UBSan
+make test-asan       # unit + integration tests under ASan/UBSan
+make soak            # short RSS/CPU/zero-write soak gate (60 s by default)
 make spec-check      # specification consistency (defaults / cross refs / symbols / install paths)
 make verify-units    # systemd template vs. generated unit
 make dist            # dist/miniddns-$(VERSION)-$(ARCH)-musl/
 make dist VERSION=0.0.1          # stable release build
 make dist VERSION=0.0.1-rc1      # release-candidate build
+make source-dist VERSION=0.0.1  # OpenWrt PKG_SOURCE tarball
+make openwrt-metadata VERSION=0.0.1  # update openwrt/Makefile PKG_VERSION/PKG_HASH
 ```
 
 ```bash
@@ -102,20 +105,22 @@ is in §01 "Non-goals".
 
 Releases are driven by the **Release** GitHub Actions workflow
 (`workflow_dispatch`): enter a version such as `0.0.1` (stable) or
-`0.0.1-rc1` (release candidate) and it creates the annotated tag, runs the
-full build/tests, generates an English changelog and publishes the GitHub
-Release. `dry_run=true` previews everything without tagging or publishing.
+`0.0.1-rc1` (release candidate) and it runs the full build/tests, generates
+the changelog and OpenWrt metadata, and only then creates the annotated tag
+and publishes the GitHub Release. `dry_run=true` previews everything without
+tagging or publishing.
 See [`docs/RELEASE_PROCESS.md`](docs/RELEASE_PROCESS.md).
 
 Each release publishes **eight Linux tarballs** — `x86`, `x64`, `arm32`,
-`arm64` × `musl` (fully static) / `glibc` (dynamic) — plus one aggregate
-`SHA256SUMS`. Cross compilation uses Zig. Only the tarballs and the checksum
-file are release assets: nothing is uploaded loose.
+`arm64` × `musl` (fully static) / `glibc` (dynamic) — plus one source tarball
+for the OpenWrt `PKG_SOURCE` recipe and one aggregate `SHA256SUMS`. Cross
+compilation uses Zig. Only the tarballs and the checksum file are release
+assets: nothing else is uploaded loose.
 
 Every tarball extracts to one self-contained install prefix, e.g.
 `miniddns-0.0.1-linux-x64-musl/`, containing `bin/miniddns`, the
-configuration examples, `install.sh`, the systemd/OpenWrt service
-configuration examples, the CA snapshot, docs, license notices and its own
+configuration examples, `install.sh`, the systemd service examples, the
+OpenWrt source-feed recipe, the CA snapshot, docs, license notices and its own
 `SHA256SUMS`. Copy that directory to `/opt` or `/usr/local`, edit the config,
 and run — no extra files are needed. The manifest is verified automatically
 by `scripts/verify_release_artifacts.py`.

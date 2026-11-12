@@ -36,6 +36,6 @@ when `$CREDENTIALS_DIRECTORY` is unset (they warn and skip credential checks).
 
 ## More examples
 
-See `examples/` in the release artifact (also shipped as individual release
-assets) for a minimal config and a multi-instance config, and `systemd/` /
-`openwrt/` for server service configuration examples.
+See `examples/` inside the release tarball for a minimal config and a
+multi-instance config, and `systemd/` / `openwrt/` for service configuration
+examples. Example files are never uploaded as individual release assets.

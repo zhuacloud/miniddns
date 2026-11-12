@@ -8,6 +8,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- daemon: schedule retries after the boot cycle (including clock-guard 30 s retries) and install signals before boot; the first backoff step is now really 5 s.
+- daemon: ignore and log SIGHUP, handle poll/signalfd/timerfd errors, and remove duplicate overflow resync/logging.
+- config/CLI: explicit missing `-c` paths and config errors return the documented exit codes; `--config=` is rejected; `$LOGS_DIRECTORY/` is expanded for `log_file`; FQDN trailing dots and empty external echo URLs are rejected.
+- TLS/HTTP: pin TLS 1.2, initialize `soerr`, make `connect_timeout_ms` cover the handshake, reject framing headers in extra headers, stop at Content-Length/chunked completion, and reject close-delimited bodies without TLS close_notify.
+- logging: cap every line at 1024 bytes with `truncated=1`; detect success is debug so steady state remains two info lines per cycle.
+- build/release: fail `LIBC=musl` without a musl toolchain; verify ELF arch/size, CA provenance and artifact permissions; add OpenWrt `PKG_SOURCE` source tarball/metadata; create the tag only after all builds pass; install license files from both installers.
+- tests: add daemon scheduling/SIGHUP tests, real netlink decode and ENOBUFS tests, keep-alive/truncation/timeout tests, ASan integration coverage and a short soak/resource gate.
+
 ### Changed
 
 - Version namespaces clarified: `docs/design.md` v1.2 is the design specification version, not a software release. Local `make` now reports `0.0.0-dev`; only the release workflow injects `VERSION=X.Y.Z`. Earlier references to "1.2.0" as a software version were a mistake (the historical commit subject below is kept verbatim).

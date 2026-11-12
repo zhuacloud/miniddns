@@ -54,7 +54,7 @@ sudo ./install.sh --prefix /opt/miniddns --sysconfdir /etc/miniddns
 | `systemd/miniddns.service` | Generated unit for the default prefix; copy directly. |
 | `systemd/miniddns.service.in` | Unit template with `@BINDIR@`/`@CONFDIR@`/`@DOCDIR@`. |
 | `systemd/miniddns.service.d/user-nonroot.conf` | Optional non-root drop-in (read §12.4 first). |
-| `openwrt/Makefile`, `openwrt/files/miniddns.init` | OpenWrt package and procd service script. |
+| `openwrt/` | OpenWrt source-feed recipe (`PKG_SOURCE`), README and procd service script. The recipe is not used to build this binary artifact. |
 | `ca/ca-certificates.crt`, `ca/README` | Fallback CA snapshot and its provenance. |
 | `doc/design.md` | Authoritative design specification. |
 | `LICENSES/`, `THIRD_PARTY_NOTICES.md` | MIT license notices for miniddns, BearSSL and jsmn. |

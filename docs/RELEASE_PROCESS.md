@@ -86,9 +86,10 @@ Requirements before triggering:
 
 - Run from the `main` branch (the workflow refuses any other ref).
 - CI must be green on `main` (`.github/workflows/ci.yml`).
-- The tag must not already exist. If a run fails after the tag was pushed,
-  delete the tag deliberately or use a new `-rcN` number; re-running the same
-  version is rejected with an English error message.
+- The tag must not already exist. The workflow creates it only after all
+  builds and tests succeed. If a run fails before tagging, no tag is left
+  behind; if publishing fails after tagging, delete the tag deliberately or
+  use a new `-rcN` number.
 - The repository must allow GitHub Actions to push commits
   (`permissions: contents: write`). If branch protection blocks the changelog
   commit, configure an exception for `github-actions[bot]`.
@@ -98,31 +99,31 @@ Requirements before triggering:
 The workflow performs exactly these steps, in order:
 
 1. **Validate** the version input and derive the prerelease flag.
-2. **Create and push the tag** (`git tag -a <version> -m "Release <version>"`).
-3. **Auto build**: download Zig, then `make`, `make spec-check`,
-   `make verify-units`, `make test`, `make test-asan`, followed by
-   `make dist` for each of the eight platform/libc combinations. Each
-   `make dist` produces a self-contained prefix directory and runs the
-   artifact verification gate; each directory is packed into a `.tar.gz`.
-4. **Generate the changelog**: `scripts/gen_changelog.py` collects
-   Conventional Commit subjects since the previous tag, groups them into
-   Added / Fixed / Performance / Documentation / Internal / Changed, writes an
-   English section into `CHANGELOG.md` (below the
-   `<!-- generated-release-sections -->` marker) and writes
-   `build/RELEASE_NOTES.md`. The changelog update is committed to `main` with
-   an English `chore(release): update changelog for <version>` message. The
-   tag intentionally points at the release source commit; the changelog commit
-   is a docs-only follow-up.
-5. **Aggregate checksums**: one `SHA256SUMS` covering all eight tarballs.
-6. **Publish** the GitHub Release with `gh release create --verify-tag`.
+2. **Build and test** without creating a tag: download Zig, then `make`,
+   `make spec-check`, `make verify-units`, `make check-config`, `make test`,
+   `make test-asan`.
+3. **Generate changelog, source tarball and OpenWrt metadata**:
+   `scripts/gen_changelog.py` writes `CHANGELOG.md` and
+   `release-assets/RELEASE_NOTES.md`; `make source-dist` creates
+   `miniddns-<version>-src.tar.gz` (excluding `openwrt/` to avoid a circular
+   hash); `make openwrt-metadata` writes `PKG_VERSION`/`PKG_HASH` into
+   `openwrt/Makefile`; the changelog and recipe are committed to `main`.
+   The source tarball is rebuilt and verified to be byte-identical.
+4. **Build all eight platform packages** with `make dist`; each produces a
+   self-contained prefix directory and runs the artifact verification gate.
+5. **Aggregate checksums** and copy the source tarball:
+   one `SHA256SUMS` covering eight binary tarballs plus the source tarball.
+6. **Create and push the tag** at the final HEAD, only after steps 2–5 pass.
+7. **Publish** the GitHub Release with `gh release create --verify-tag`.
    `-rcN` versions get `--prerelease`; stable versions get `--latest`.
-   **Only the eight tarballs and `SHA256SUMS` are uploaded.** The install
-   script, configuration examples and service configuration examples live
-   exclusively inside each tarball; they are never loose release assets.
-7. Write an English summary to the workflow run summary.
+   **Only the tarballs (8 binary + 1 source) and `SHA256SUMS` are uploaded.**
+   The install script, configuration examples and service configuration
+   examples live exclusively inside each tarball; they are never loose
+   release assets.
+8. Write an English summary to the workflow run summary.
 
-`dry_run=true` executes steps 1 and 3–5, prints the generated notes into the
-run summary, and skips steps 2, 6 and the changelog commit/push.
+`dry_run=true` executes steps 1–5, prints the generated notes into the
+run summary, and skips steps 6–7 and the commit/push.
 
 ## 5. Release artifact structure
 
@@ -146,8 +147,9 @@ miniddns-<version>-linux-<arch>-<libc>/
 │   ├── miniddns.service              # generated unit, copy directly
 │   ├── miniddns.service.in           # template with @BINDIR@/@CONFDIR@/@DOCDIR@
 │   └── miniddns.service.d/user-nonroot.conf
-├── openwrt/                          # server configuration example (procd)
-│   ├── Makefile                      # DEPENDS:=+ca-bundle
+├── openwrt/                          # source-feed recipe + procd example
+│   ├── Makefile                      # PKG_SOURCE + DEPENDS:=+ca-bundle
+│   ├── README.md                     # feed usage; not buildable from the binary tarball
 │   └── files/miniddns.init
 ├── ca/
 │   ├── ca-certificates.crt           # fallback CA snapshot
@@ -184,12 +186,20 @@ cd /opt/miniddns-0.0.1-linux-x64-musl && sudo ./install.sh --prefix /opt/miniddn
 - only the allowed top-level entries exist (no stray files);
 - every required file exists, is non-empty, and the binary / install script /
   procd script are executable;
-- musl builds are static ELF and glibc builds are dynamic ELF;
+- musl builds are static ELF (ET_EXEC, no `PT_INTERP`, ≤ 500 KiB) and glibc
+  builds are dynamic ELF; ELF class/machine matches `--arch`;
 - `bin/miniddns --version` (native builds) or the embedded version string
   (cross builds) matches `VERSION`;
+- the CA bundle has a plausible anchor count and its `ca/README` sha256
+  matches;
+- no artifact file or directory is group/world writable;
 - every file is listed in `SHA256SUMS` and every checksum matches;
 - **no** `miniddns.conf`, `*.token`, `.git*` or `build/` directory is present;
 - the `LICENSES/` MIT notices are present.
+
+The separate source tarball (`miniddns-<version>-src.tar.gz`) is generated by
+`make source-dist`; its sha256 is written into `openwrt/Makefile` as
+`PKG_HASH` by `scripts/update_openwrt.py`.
 
 A real `miniddns.conf` and token files are never packaged: a bundled config
 would shadow `/etc/miniddns/miniddns.conf` (§03) and credentials must never
@@ -201,8 +211,9 @@ On every push/PR to `main` (and on manual dispatch), CI:
 
 - downloads Zig;
 - builds with `make -j"$(nproc)"`;
-- runs `make spec-check`, `make verify-units`, `make test` and
-  `make test-asan`;
+- runs `make spec-check`, `make verify-units`, `make check-config`,
+  `make test`, `make test-asan`, a short `make soak` (60 s) and a source
+  tarball smoke test;
 - builds the two native x64 packages (`musl` and `glibc`) with
   `make dist` to verify the artifact structure and manifest gate;
 - uploads those tarballs as build artifacts (nothing is published).
@@ -215,7 +226,7 @@ On every push/PR to `main` (and on manual dispatch), CI:
   `<!-- generated-release-sections -->` marker, newest first.
 - Re-running the generator for the same version replaces that version's
   section instead of duplicating it.
-- The release body is `build/RELEASE_NOTES.md`; it includes a compare link
+- The release body is `release-assets/RELEASE_NOTES.md`; it includes a compare link
   (`<previous-tag>...<version>`) or a commits link for the first release.
 - Commit subjects should follow Conventional Commits so the grouping is
   meaningful.
@@ -226,7 +237,11 @@ On every push/PR to `main` (and on manual dispatch), CI:
 make version-check VERSION=0.0.1        # stable
 make version-check VERSION=0.0.1-rc1    # release candidate
 
-# one package (native musl)
+# OpenWrt source tarball + recipe metadata
+make source-dist VERSION=0.0.1
+make openwrt-metadata VERSION=0.0.1
+
+# one binary package (native musl; requires musl-gcc or ZIG_TARGET)
 make dist VERSION=0.0.1 TARGET_ARCH=x64 LIBC=musl \
      ZIG_TARGET=x86_64-linux-musl ZIG=/path/to/zig
 

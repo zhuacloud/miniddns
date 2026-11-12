@@ -289,7 +289,7 @@ INI 子集：`[section]` + `key = value`。`[record]` 与 `[provider]` 可重复
 - `key` 与 `value` 大小写不敏感（key）；value 保持原样并 trim 两侧空白
 - 不支持续行、不支持引号、不支持转义
 - **未知 key、未知 section、重复的非重复 key → 硬错误并给出行号**（拼写错误必须当场发现，不能静默忽略）
-- 值中的 `${ENV}` **不展开**（唯一例外是 `token_file` 的 `$CREDENTIALS_DIRECTORY/` 前缀，见下）
+- 值中的 `${ENV}` **不展开**；仅允许两个前缀展开：`token_file` 的 `$CREDENTIALS_DIRECTORY/`（见 §04.4）和 `log_file` 的 `$LOGS_DIRECTORY/`（见 §04.2）
 - **跨全文所有 `[record]` 的 `(provider, name, type)` 必须唯一**，重复即报错，并在消息中给出**两处**行号（同一 section 内本来就只能出现一次，但两条不同 `[record]` 争抢同一远端记录会导致"A 写 1.1.1.1、B 写 2.2.2.2"来回抖动）
 - 数值类 key 必须做范围检查（见各表"说明"列的上下限）；`retry_backoff` 最多 8 项，项值 ∈ `[1, 86400]`
 
@@ -307,7 +307,7 @@ INI 子集：`[section]` + `key = value`。`[record]` 与 `[provider]` 可重复
 | `retry_backoff` | `5,15,60,300` | 失败后的重试间隔序列（秒），用尽后固定在最后一个值；最多 8 项 |
 | `log_level` | `info` | `error\|warn\|info\|debug` |
 | `log_target` | `journald` | `journald`（stdout+stderr 交 systemd 收集）`\|file` |
-| `log_file` | *空* | `log_target=file` 时必填。**必须位于 `$LOGS_DIRECTORY` 或 `/var/log/miniddns/` 下**，否则 `ProtectSystem=strict` 下写不进去（§12.1） |
+| `log_file` | *空* | `log_target=file` 时必填。**必须位于 `$LOGS_DIRECTORY` 或 `/var/log/miniddns/` 下**，否则 `ProtectSystem=strict` 下写不进去（§12.1）。`$LOGS_DIRECTORY/` 前缀在加载配置时展开；守护进程路径下变量缺失是 `E_CFG`，诊断路径下 warn 并回退 stdout |
 | `lock_file` | *自动* | 默认 `$RUNTIME_DIRECTORY/<instance>.lock`（无 `RUNTIME_DIRECTORY` 时 `/run/miniddns/<instance>.lock`，再失败用 `/tmp/miniddns-<instance>.lock`） |
 | `clock_guard_epoch` | `1700000000` | 系统时间早于此值视为时钟未同步（§05.6） |
 
@@ -561,7 +561,8 @@ OpenWrt 等无 RTC 设备开机时 `time()` 可能返回 1970。TLS 会以“证
 - 任何 HTTPS 请求前检查 `time(NULL) < clock_guard_epoch`
 - 命中则 log warn `clock not synced`，按 30 s 固定间隔重试，**不消耗退避计数**，不计入 cycle 失败统计
 - 同时区分日志：时间类错误用 `err=E_TLS_TIME`，与 `err=E_TLS_CERT` 严格分开（否则排障会误判为 CA 坏了）
-- 时钟守卫生效期间**不做任何写请求**（不是"失败重试"，而是"先不发"）；`--print-ip` 不受它影响（不发 TLS）
+- 时钟守卫生效期间**不做任何写请求**（不是"失败重试"，而是"先不发"）
+- `--print-ip` 的 `iface` 模式不涉及 TLS，不受影响；`external` / `auto` 模式仍要发 HTTPS，因此同样受时钟守卫约束（输出 `ipv4=none`）
 
 ### 05.7 并发与域名解析
 
@@ -856,7 +857,7 @@ Connection: close\r\n
 | body 上限 | 256 KiB，超出 → 截断并 `E_PARSE reason=body_too_large`（不 OOM） |
 | 需要解析的头部 | `Content-Length`（可选）；`Transfer-Encoding`；`Content-Encoding`；`Retry-After`；`Content-Type` |
 | Content-Type | **仅对 provider 端点**校验含 `json`；`ipv4_echo_url` 返回 `text/plain` 完全正常，不得因此失败 |
-| 结束条件 | 有 `Content-Length` → 读满；有 `Transfer-Encoding: chunked` → 走 chunked 解码；两者都无 → 读到 EOF |
+| 结束条件 | 有 `Content-Length` → 读满即停；有 `Transfer-Encoding: chunked` → 解到终止块即停；两者都无 → 读到 EOF，且**必须收到 TLS `close_notify`**；裸 TCP FIN 视为 `E_TLS_HANDSHAKE reason=tls_truncated` |
 | chunked | **必须实现最小解码**：只支持 `chunk-size[;ext]CRLF data CRLF ... 0 CRLF [trailer] CRLF`；不合法分块头/超长/负数 → `E_PARSE reason=bad_chunk`；不支持其他 `Transfer-Encoding` 值（→ `E_PARSE reason=transfer_encoding`） |
 | Content-Encoding | 仅接受 `identity` 或缺省；出现 `gzip`/`br`/`deflate` → `E_PARSE reason=encoded_body`（因为我们禁发 `Accept-Encoding`，出现即服务端异常） |
 | 重定向 | **provider 请求：不跟随**（3xx → `E_HTTP_STATUS`）。**IPv4 echo 请求：最多 3 跳**，规则见 §06.2 |
@@ -1025,7 +1026,7 @@ read bundle (≤2 MiB, 整文件读入)        # 路径已按 §03 校验（允�
 | netlink | `<6>miniddns: netlink subscribed groups=link,ipv4_ifaddr,ipv6_ifaddr rcvbuf_actual=425984 initial_addrs=3 level=info` |
 | 事件 | `<7>miniddns: addr event family=inet6 action=add iface=eth0 addr=2402:... level=debug` |
 | cycle | `<6>miniddns: cycle start reason=event level=info` |
-| 探测结果 | `<6>miniddns: detect family=inet6 source=iface ip=2402:... candidates=2 level=info` |
+| 探测结果 | `<7>miniddns: detect family=inet6 source=iface ip=2402:... candidates=2 level=debug`（§10.3 稳态只允许两行 info） |
 | 跳过（无 IP） | `<6>miniddns: record name=home.example.com type=AAAA action=skip reason=no-publishable-ipv6 candidates=2 filtered_temporary=1 filtered_dadfailed=1 level=info` |
 | 跳过（远端不存在） | `<6>miniddns: record name=... type=A action=skip reason=absent level=info` |
 | 未变化 | `<6>miniddns: record name=home.example.com type=A action=unchanged ip=203.0.113.7 level=info` |
@@ -1280,12 +1281,14 @@ Group=miniddns
 OpenWrt 使用 procd。产物中额外提供 `openwrt/Makefile` 与 `openwrt/files/miniddns.init`，并在 §13.3 的 dist 布局中包含它们。要点：
 
 - `procd_set_param respawn 3600 5 5`，`procd_set_param command /usr/bin/miniddns --foreground`
+- 包 recipe 使用 `PKG_SOURCE=miniddns-$(PKG_VERSION)-src.tar.gz`（由 `make source-dist` 生成并随 release 上传）；`PKG_VERSION`/`PKG_HASH` 由发布流程的 `scripts/update_openwrt.py` 写入
 - `procd_set_param limits core="0 0"`；**不需要** `_capabilities` 参数
 - `START=99`（等 `sysntpd` 起来），`USE_PROCD=1`
 - procd **不提供** systemd 那套 hardening；因此程序内的 fail-closed 校验（§09/§03）是唯一的防线，不可绕过
 - **包的 `DEPENDS` 必须含 `+ca-bundle`**（否则 `/etc/ssl/certs/ca-certificates.crt` 不存在，§03 的 CA 探测全部落空）
 - 建议在 `postinst` 或 `service_triggers()` 里跑一次 `/usr/bin/miniddns --check-ca`（失败只记日志，不要阻断安装）；注意 OpenWrt 上没有 `systemd-analyze` 等价门禁，验收只能靠运行自查
 - 静态构建用 SDK 的 musl 工具链，`-static`，不要链接 `libustream`/`libopenssl`（与 BearSSL 重复且拉入依赖链）
+- `Build/Compile` 必须传 `NO_HOST_UAPI=1`，使用 SDK 的目标 UAPI 头，不得注入宿主 `/usr/include/linux`
 
 ### 12.7 运维命令
 
@@ -1481,8 +1484,9 @@ dist/miniddns-$(VERSION)-linux-<arch>-<libc>/   # 8 个平台/libc 组合，每�
 │   ├── miniddns.service           # 已按默认 PREFIX=/opt/miniddns 生成，可直接 cp
 │   ├── miniddns.service.in        # 模板，供自定义 PREFIX
 │   └── miniddns.service.d/user-nonroot.conf   # 非 root drop-in
-├── openwrt/                      # 服务器配置示例（procd）
-│   ├── Makefile                   # DEPENDS:=+ca-bundle
+├── openwrt/                      # 源码 feed recipe + procd 示例
+│   ├── Makefile                   # PKG_SOURCE + DEPENDS:=+ca-bundle
+│   ├── README.md                  # feed 用法；不能从二进制 tarball 单独构建
 │   └── files/miniddns.init
 ├── ca/ca-certificates.crt         # 从构建机 $(CA_SRC) 复制
 ├── ca/README                      # 快照 UTC 日期 + sha256 + 来源发行版 + 证书数
@@ -1502,11 +1506,11 @@ dist/miniddns-$(VERSION)-linux-<arch>-<libc>/   # 8 个平台/libc 组合，每�
 1. `verify-units` → 模板与成品一致
 2. 按 `TARGET_ARCH` / `LIBC` / `ZIG_TARGET` 交叉编译 → `bin/miniddns`（musl 走 `-static`，glibc 走动态链接；Zig 提供各目标的内核 UAPI 头）
 3. 复制 `systemd/`（含 `.service`/`.service.in`/drop-in 目录）、`openwrt/`、`conf/*.example` + `conf/README.md`、`examples/`、`doc/`、`install.sh`
-4. `make ca-refresh` → `ca/ca-certificates.crt` + `ca/README`（含 sha256）
+4. `make ca-refresh` → `ca/ca-certificates.crt` + `ca/README`（含 sha256），并由 `scripts/verify_ca_bundle.py` 校验锚点数量与 provenance
 5. 复制 `LICENSES/`（项目与两个 vendor 组件的 MIT 声明）
 6. `sha256sum` 全树 → `SHA256SUMS`
 7. **断言**：不得包含 `conf/miniddns.conf`、`*.token`、`build/`、`.git*`；`LICENSES/` 不得为空
-8. **产物清单门禁**（v1.2.2 新增）：`scripts/verify_release_artifacts.py` 校验「可运行二进制 / 配置示例 / 安装脚本 / 服务器配置示例」等全部必需文件存在、非空、权限正确、二进制为静态且 `--version` 与 `$(VERSION)` 一致、每个文件的 sha256 与 `SHA256SUMS` 一致。发布流程见 `docs/RELEASE_PROCESS.md`。
+8. **产物清单门禁**：`scripts/verify_release_artifacts.py` 校验必需文件存在、非空、权限正确、ELF class/machine 与 `--arch` 一致、musl 产物无 `PT_INTERP` 且 ≤ 500 KiB、CA bundle 锚点数/provenance、`--version` 与 `$(VERSION)` 一致、每个文件的 sha256 与 `SHA256SUMS` 一致。发布流程见 `docs/RELEASE_PROCESS.md`。
 
 > **强制 · dist 包内禁止出现的文件**
 >
@@ -1533,7 +1537,7 @@ This bundle is a FALLBACK. Prefer the system store when available.
 | --- | --- |
 | Debian/Ubuntu | 直接 `cc` 动态链接 glibc 即可 |
 | Alpine / 静态 | `musl-gcc -static`；产物 `ldd` 输出 "not a dynamic executable" |
-| OpenWrt | 用 SDK 的 `staging_dir/toolchain-*/bin/*-openwrt-linux-musl-gcc`，`-static`；**不要链接 `libustream`/`libopenssl`**（与 BearSSL 重复并拉入无关依赖链） |
+| OpenWrt | 用 SDK 的 `staging_dir/toolchain-*/bin/*-openwrt-linux-musl-gcc`，`-static`，`NO_HOST_UAPI=1`；**不要链接 `libustream`/`libopenssl`**（与 BearSSL 重复并拉入无关依赖链） |
 | ARMv7/AArch64 | 同上，注意 BearSSL 的 `BR_ARMEL_CORTEXM_GCC` 等宏**不要**误加（那些是裸机互斥的） |
 
 <a name="s14" id="s14"></a>
@@ -1564,7 +1568,7 @@ This bundle is a FALLBACK. Prefer the system store when available.
 
 - [ ] `--print-ip` 在本机输出正确的 IPv6（与 `ip -6 addr` 结果人工比对）
 - [ ] `--check-config` 对仓库内 example 文件通过，且 token 字段被打码
-- [ ] `--check-ca` 对 `api.cloudflare.com` 握手成功；故意把 `ca_bundle` 指向一个空文件时失败且给出 `E_TLS_CERT`
+- [ ] `--check-ca` 对 `api.cloudflare.com` 握手成功；故意把 `ca_bundle` 指向一个空文件时失败且给出 `E_CA_LOAD`（与 §09.1 一致）
 - [ ] 用 Python 起一个**自签名 TLS mock server**（自带 CA），验证：
   - 信任该 CA 时握手成功
   - 不信任时返回 `E_TLS_CERT` 且**不发送任何请求字节**（用 server 端计数断言）
@@ -1585,6 +1589,7 @@ This bundle is a FALLBACK. Prefer the system store when available.
 | 注入 | 期望行为 |
 | --- | --- |
 | `kill -TERM` | 10 s 内干净退出，退出码 0，无 core |
+| `kill -HUP` | 记录 `sighup_ignored` 并继续运行，不退出 |
 | DNS 全失败 | `E_DNS` → 退避重试，进程不死 |
 | 拔网线 / `ip link set down` | 收到 `RTM_NEWLINK`，cycle 记 `no-ip` 并跳过，**不清除已有 DNS 记录** |
 | 系统时间回退到 1970 | 时钟守卫生效，30 s 重试，日志区分 `tls_time` |
@@ -1605,6 +1610,8 @@ This bundle is a FALLBACK. Prefer the system store when available.
 - 期间执行 6 次 `ip addr add/del` → 断言恰好 6 次写入
 - 额外断言：**每 cycle 一行 discover GET / 每 cycle 两行 info**（§10.3 的噪声控制必须可度量）
 - 内存专项：`write_memo_ms=0` 与 `=60000` 两种配置下各跑 1 h，确认 memo 无累积（上限 = 记录数）
+- 自动化入口：`make soak`（默认 60 s 冒烟）；完整验收用
+  `python3 scripts/soak.py --seconds 86400 --interval 60`，脚本会检查零写入、cycle 数、RSS/峰值/CPU 阈值。
 
 ### 14.5 资源验收阈值 `门禁`
 
@@ -1616,14 +1623,14 @@ systemctl show -p CPUUsageNSec -p MemoryPeak miniddns
 | --- | --- |
 | 常驻 RSS（`MemoryCurrent`） | ≤ 2.5 MB |
 | 峰值（`MemoryPeak`） | ≤ 6 MB（CA 加载 + TLS 握手瞬时） |
-| 24 h 累计 CPU（`CPUUsageNSec`） | ≤ 2 s |
+| 24 h 累计 CPU（`CPUUsageNSec`） | ≤ 2 s（`make soak` 在短时冒烟中按同一上限检查） |
 | 稳态写入请求 | 0 次/24 h（IP 不变时） |
 | 静态产物 | ≤ 500 KB |
 
 ### 14.6 代码质量门禁
 
 - [ ] `-Wall -Wextra` 零警告
-- [ ] ASan/UBSan 构建下通过全部单元测试（`make test-asan`）
+- [ ] ASan/UBSan 构建下通过全部单元测试**和集成测试**（`make test-asan`；LD_PRELOAD 场景通过 `verify_asan_link_order=0` 保留 coverage）
 - [ ] `valgrind --leak-check=full` 在 `--once` 与 `--check-ca` 路径下零 definite/indirect 泄漏
 - [ ] 仓库内无 `system(`/`popen(`/`fork(`（本方案不需要）
 - [ ] 无 `strcpy`/`strcat`/`sprintf`（只用 `snprintf` 并检查返回值）
@@ -1647,7 +1654,7 @@ systemctl show -p CPUUsageNSec -p MemoryPeak miniddns
 | **M2** | `nl_addr.c` + `detect.c` + `--print-ip` | 与 `ip -6 addr` 结果一致；temporary/dadfailed 被正确剔除；**`ip link set down` 后探测返回 none**；手工 `ip addr add/del` 能触发事件；IPv6 无 `IFA_LABEL` 时 include/exclude 仍生效 |
 | **M3** | `provider.c` + `prov_cloudflare.c` + `--once` / `--dry-run` | 对接 mock server 全部集成用例通过；IP 未变时零写入 |
 | **M4** | 事件循环、debounce、兜底 `timerfd`、退避（含 `interval_fallback=0`）、时钟守卫、flock、signalfd | soak 24 h 通过 §14.4；断开/恢复网络行为正确；debounce 硬上限生效 |
-| **M5** | systemd 单元（`.in` + 成品 + drop-in）、`install.sh`、`make install`、procd 脚本、`make dist`（含 `LICENSES/`）、`ca/` 快照、文档、OpenWrt 静态产物 | §14.5 资源门禁通过；`ldd` 显示静态；`make verify-units` 与 `make dist` 断言通过；装机（新机 + 无 token）流程不出现 `243/CREDENTIALS`；装机后 30 分钟内零 error 日志 |
+| **M5** | systemd 单元（`.in` + 成品 + drop-in）、`install.sh`、`make install`、procd 脚本、`make dist`（含 `LICENSES/`）、`ca/` 快照、文档、OpenWrt 静态产物 | §14.5 资源门禁通过；`ldd` 显示静态；`make verify-units` 与 `make dist` 断言通过；装机（新机 + 无 token）流程不出现 `243/CREDENTIALS`；装机后 30 分钟内除 `ca expired_anchors=N`（§09.5 明确保留的 error）外零 error 日志 |
 
 > **建议 · 给实现者的两条建议**
 >
