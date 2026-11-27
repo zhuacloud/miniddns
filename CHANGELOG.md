@@ -39,6 +39,19 @@
 
 <!-- generated-release-sections -->
 
+## [0.0.1-rc4] - 2026-11-27
+
+**Full Changelog**: https://github.com/zhuacloud/miniddns/compare/0.0.1-rc3...0.0.1-rc4
+
+### Fixed
+
+- fix(netlink): normalise IFA_F_DEPRECATED from ifa_prefered for IPv6 (a7f6da4)
+
+### Documentation
+
+- docs: record v1.3.1 netlink amendment and rc3 production calibration (76eb58a)
+
+
 ## [0.0.1-rc3] - 2026-11-27
 
 **Full Changelog**: https://github.com/zhuacloud/miniddns/compare/0.0.1-rc2...0.0.1-rc3
