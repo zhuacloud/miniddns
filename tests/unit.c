@@ -260,6 +260,37 @@ static void add_rta(char *buf, size_t *off, int type, const void *data, size_t l
     *off += RTA_ALIGN(rta->rta_len);
 }
 
+struct nl_test_msg {
+    struct nlmsghdr nlh;
+    struct ifaddrmsg ifa;
+    char attrs[128];
+};
+
+/* Append one RTM_NEWADDR message (IFA_ADDRESS + optional IFA_FLAGS / IFA_CACHEINFO)
+   to a suitably aligned buffer and return its NLMSG_ALIGN'ed length. */
+static size_t put_newaddr(unsigned char *buf, sa_family_t family, unsigned ifindex,
+                          uint8_t scope, const void *addr, size_t alen,
+                          const uint32_t *flags, const struct ifa_cacheinfo *ci)
+{
+    struct nl_test_msg *m = (struct nl_test_msg *)buf;
+    size_t off = 0;
+
+    memset(m, 0, sizeof(*m));
+    m->nlh.nlmsg_type = RTM_NEWADDR;
+    m->nlh.nlmsg_len = NLMSG_LENGTH(sizeof(m->ifa));
+    m->ifa.ifa_family = family;
+    m->ifa.ifa_prefixlen = (family == AF_INET) ? 32 : 64;
+    m->ifa.ifa_scope = scope;
+    m->ifa.ifa_index = ifindex;
+    add_rta(m->attrs, &off, IFA_ADDRESS, addr, alen);
+    if (flags != NULL)
+        add_rta(m->attrs, &off, IFA_FLAGS, flags, sizeof(*flags));
+    if (ci != NULL)
+        add_rta(m->attrs, &off, IFA_CACHEINFO, ci, sizeof(*ci));
+    m->nlh.nlmsg_len += (uint32_t)off;
+    return NLMSG_ALIGN(m->nlh.nlmsg_len);
+}
+
 static void test_nl_decode(void)
 {
     struct mn_nl nl;
@@ -306,6 +337,41 @@ static void test_nl_decode(void)
     CHECK(a.has_cacheinfo && a.valid_lft == 0, "IFA_CACHEINFO decoded");
     CHECK(a.if_up == 1 && !strcmp(a.ifname, "lo"),
           "if_indextoname + IFF_UP table: name=%s up=%d", a.ifname, a.if_up);
+
+    /* v1.3.1: an IPv6 address whose IFA_CACHEINFO.ifa_prefered == 0 is deprecated no
+       matter what IFA_FLAGS says. During an RA lifetime update the kernel clears
+       IFA_F_DEPRECATED before the first RTM_NEWADDR (addrconf_prefix_rcv_add_addr)
+       and sets it again in addrconf_verify(), so the transient first message must be
+       normalised to the same effective state the dump reports. ifa_prefered > 0 keeps
+       IFA_FLAGS untouched, and IPv4 (no deprecation concept) is never rewritten. */
+    {
+        uint32_t f_mta = 0x100;                       /* IFA_F_MANAGETEMPADDR */
+        uint32_t f0 = 0;
+        unsigned char v4[4] = { 192, 0, 2, 1 };
+        struct ifa_cacheinfo cdep = { 0, 1694230, 0, 0 };
+        struct ifa_cacheinfo cpref = { 604800, 2592000, 0, 0 };
+        struct nl_test_msg m;
+
+        memset(&m, 0, sizeof(m));
+        put_newaddr((unsigned char *)&m, AF_INET6, lo, RT_SCOPE_UNIVERSE, v6, 16,
+                    &f_mta, &cdep);
+        CHECK(mn_nl_decode_addr(&nl, &m.nlh, &a) == 1 && a.flags == (f_mta | IFA_F_DEPRECATED),
+              "ifa_prefered=0 normalises DEPRECATED: flags=0x%x", a.flags);
+        CHECK(a.has_cacheinfo && a.valid_lft == 1694230,
+              "ifa_valid decoded alongside normalisation: valid=%u", a.valid_lft);
+
+        memset(&m, 0, sizeof(m));
+        put_newaddr((unsigned char *)&m, AF_INET6, lo, RT_SCOPE_UNIVERSE, v6, 16,
+                    &f_mta, &cpref);
+        CHECK(mn_nl_decode_addr(&nl, &m.nlh, &a) == 1 && a.flags == f_mta,
+              "ifa_prefered>0 keeps IFA_FLAGS: flags=0x%x", a.flags);
+
+        memset(&m, 0, sizeof(m));
+        put_newaddr((unsigned char *)&m, AF_INET, lo, RT_SCOPE_UNIVERSE, v4, 4,
+                    &f0, &cdep);
+        CHECK(mn_nl_decode_addr(&nl, &m.nlh, &a) == 1 && a.flags == 0,
+              "IPv4 ifa_prefered=0 does not set DEPRECATED: flags=0x%x", a.flags);
+    }
 
     /* v1.3 REQ-07: filtered drain suppresses RA IFA_CACHEINFO refresh and noise,
        while passing real address changes and allowed-interface IFF_RUNNING flips. */
@@ -371,6 +437,87 @@ static void test_nl_decode(void)
             dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
             CHECK(dr == 0 && ov == 0 && carrier == 0,
                   "RA pure lifetime refresh filtered: dr=%d ov=%d carrier=%d", dr, ov, carrier);
+
+            /* 1b) Production RA burst on a deprecated address (v1.3.1 regression,
+               captured on kernel 6.12 with an ISP prefix transition). One RA yields
+               three RTM_NEWADDR in a single datagram: the preferred address refresh,
+               then the deprecated address twice: IFA_FLAGS=0x100 (DEPRECATED cleared
+               by addrconf_prefix_rcv_add_addr) and IFA_FLAGS=0x120 (re-set by
+               addrconf_verify()); both carry ifa_prefered=0. The dump fingerprint of
+               the deprecated address is 0x120, so the transient message must not
+               be reported as interesting (rc3 armed the debounce on every RA). */
+            {
+                struct mn_addr_set snap2;
+                union {
+                    struct nl_test_msg m[3];
+                    unsigned long align_u;
+                    unsigned char b[3 * sizeof(struct nl_test_msg)];
+                } pk;
+                unsigned char v6dep[16];
+                const unsigned char *addr3[3];
+                uint32_t fl[3] = { f_norm, f_norm, f_depr };
+                struct ifa_cacheinfo ci3[3] = {
+                    { 604800, 2592000, 0, 0 }, { 0, 1694230, 0, 0 }, { 0, 1694230, 0, 0 }
+                };
+                size_t total = 0;
+                int i;
+
+                CHECK(inet_pton(AF_INET6, "2001:4860:4860:1::8888", v6dep) == 1, "v6dep fixture");
+                addr3[0] = v6;
+                addr3[1] = v6dep;
+                addr3[2] = v6dep;
+                memcpy(&snap2, &snap, sizeof(snap2));
+                snap2.n = 2;
+                memcpy(&snap2.a[1], &snap.a[0], sizeof(snap2.a[1]));
+                memcpy(snap2.a[1].bytes, v6dep, 16);
+                snap2.a[1].flags = f_depr;            /* as reported by RTM_GETADDR */
+                snap2.a[1].valid_lft = 1694276;
+                mn_nl_snapshot_fps(&fnl, &snap2);
+
+                memset(&pk, 0, sizeof(pk));
+                for (i = 0; i < 3; i++)
+                    total += put_newaddr(pk.b + total, AF_INET6, lo,
+                                         RT_SCOPE_UNIVERSE, addr3[i], 16,
+                                         &fl[i], &ci3[i]);
+                CHECK(send(sv[1], pk.b, total, 0) == (ssize_t)total, "send production RA burst");
+                dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+                CHECK(dr == 0 && ov == 0 && carrier == 0,
+                      "RA clear/re-set DEPRECATED pair filtered: dr=%d ov=%d carrier=%d",
+                      dr, ov, carrier);
+
+                /* 1c) deprecated -> preferred is a real change: same IFA_FLAGS=0x100
+                   shape but ifa_prefered > 0 => triggers (1) */
+                {
+                    struct nl_test_msg m;
+                    struct ifa_cacheinfo cip = { 604800, 1694276, 0, 0 };
+                    size_t len;
+
+                    memset(&m, 0, sizeof(m));
+                    len = put_newaddr((unsigned char *)&m, AF_INET6, lo, RT_SCOPE_UNIVERSE,
+                                      v6dep, 16, &f_norm, &cip);
+                    (void)send(sv[1], &m, len, 0);
+                    dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+                    CHECK(dr == 1, "deprecated -> preferred triggers: dr=%d", dr);
+                }
+
+                /* 1d) preferred -> deprecated by lifetime only (IFA_FLAGS unchanged,
+                   ifa_prefered drops to 0) => triggers (1) */
+                {
+                    struct nl_test_msg m;
+                    struct ifa_cacheinfo cid = { 0, 1694276, 0, 0 };
+                    size_t len;
+
+                    memset(&m, 0, sizeof(m));
+                    len = put_newaddr((unsigned char *)&m, AF_INET6, lo, RT_SCOPE_UNIVERSE,
+                                      v6, 16, &f_norm, &cid);
+                    (void)send(sv[1], &m, len, 0);
+                    dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+                    CHECK(dr == 1, "preferred -> deprecated by lifetime triggers: dr=%d", dr);
+                }
+
+                /* restore the single-address snapshot used by the cases below */
+                mn_nl_snapshot_fps(&fnl, &snap);
+            }
 
             /* 2) Flag transition to DEPRECATED => triggers (1) */
             memset(&msg, 0, sizeof(msg));

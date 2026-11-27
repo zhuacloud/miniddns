@@ -239,6 +239,7 @@ int mn_nl_decode_addr(struct mn_nl *nl, const struct nlmsghdr *nh,
     const unsigned char *src;
     uint32_t flags_attr = 0;
     uint32_t valid_lft = 0;
+    uint32_t preferred_lft = 0;
     int have_flags_attr = 0;
     int have_cacheinfo = 0;
     size_t alen;
@@ -280,6 +281,8 @@ int mn_nl_decode_addr(struct mn_nl *nl, const struct nlmsghdr *nh,
             break;
         case IFA_CACHEINFO:
             if (dlen >= 2 * sizeof(valid_lft)) {
+                /* struct ifa_cacheinfo: ifa_prefered, ifa_valid, cstamp, tstamp */
+                memcpy(&preferred_lft, data, sizeof(preferred_lft));
                 memcpy(&valid_lft, data + sizeof(valid_lft), sizeof(valid_lft));
                 have_cacheinfo = 1;
             }
@@ -300,6 +303,17 @@ int mn_nl_decode_addr(struct mn_nl *nl, const struct nlmsghdr *nh,
     memcpy(a->bytes, src, alen);
     a->scope = ifa.ifa_scope;
     a->flags = have_flags_attr ? flags_attr : (uint32_t)ifa.ifa_flags;
+    /* v1.3.1 (REQ-07 fix): an IPv6 address with ifa_prefered == 0 is deprecated
+       regardless of the IFA_F_DEPRECATED bit. On every RA lifetime update the
+       kernel clears IFA_F_DEPRECATED before emitting the first RTM_NEWADDR
+       (addrconf_prefix_rcv_add_addr(), "update_lft") and sets it again right
+       away in addrconf_verify(), emitting a second RTM_NEWADDR. The transient
+       first message (IFA_F_DEPRECATED clear, ifa_prefered == 0) never matched the
+       dump fingerprint (DEPRECATED set) and armed the debounce on every RA.
+       Normalising it here makes events and dumps describe the same effective
+       state; real transitions (either direction) still change the fingerprint. */
+    if (ifa.ifa_family == AF_INET6 && have_cacheinfo && preferred_lft == 0)
+        a->flags |= IFA_F_DEPRECATED;
     a->has_cacheinfo = have_cacheinfo;
     a->valid_lft = have_cacheinfo ? valid_lft : 0;
     a->ifindex = (unsigned)ifa.ifa_index;
