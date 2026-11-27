@@ -54,6 +54,7 @@ miniddns instead:
 | Start implementing | `docs/design.md` §02–§09, §13.1, §14.1 |
 | Packaging / operations | `docs/design.md` §03, §11, §12, §13.3, §14.5 |
 | What changed since v1.1 | [`docs/review-design-v1.1.md`](docs/review-design-v1.1.md) |
+| Next-version requirements & design baseline (v1.3 draft) | [`docs/design-v1.3-baseline.md`](docs/design-v1.3-baseline.md) |
 | Verify the original wording | [`docs/archive/design-v1.1.html`](docs/archive/design-v1.1.html) (read-only snapshot) |
 | Changelog | [`CHANGELOG.md`](CHANGELOG.md) |
 | Implementation and acceptance report | [`docs/DELIVERY.md`](docs/DELIVERY.md) |

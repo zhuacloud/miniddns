@@ -68,10 +68,12 @@ sha256sum -c SHA256SUMS
 
 ## Which package should I use?
 
-- **musl** builds are fully static and portable across Linux distributions;
-  they are the recommended choice for embedded/OpenWrt systems.
-- **glibc** builds are dynamically linked and expect a compatible glibc on
-  the target system; they are the natural choice on glibc distributions.
+- **musl** builds are fully static, portable across Linux distributions, and
+  have the lowest resident memory footprint (no glibc shared-library RSS).
+  They are the **recommended default** for both general Linux servers and
+  embedded/OpenWrt systems.
+- **glibc** builds are dynamically linked against the host glibc and expect a
+  compatible glibc on the target system.
 
 If unsure, check your libc with `ldd --version` (glibc) or `apk info musl`
 (Alpine/musl).

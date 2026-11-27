@@ -20,6 +20,12 @@
 
 ### Changed
 
+- v1.3 CPU & memory governance (`docs/design-v1.3-baseline.md`, synced to `docs/design.md`):
+  - Netlink layer-1 filter (`mn_nl_drain_filtered`) suppresses IPv6 RA `IFA_CACHEINFO` lifetime refreshes and excluded/non-global/tentative/temporary noise while preserving allowed-interface `IFF_UP`/`IFF_RUNNING` carrier flips for NAT hosts; layer-2 local snapshot diff skips spurious `reason=event` cycles without perturbing retry backoff state.
+  - Per-cycle IP detection family caching (`mn_detect_ipv4`/`mn_detect_ipv6`), BearSSL default 64-bit RSA/ECDSA verification (`i62`), and Cloudflare dual-stack `A+AAAA` single-cycle discover consolidation (`per_page=100` with automatic typed fallback on `total_pages > 1`); `cycle end` now appends `reason=` and `tls=`.
+  - Eliminated transient large file allocations (`mn_checked_open`, 4 KiB streaming CA loader, 576 B stack token-file read, exact-size single-pass config read) and added glibc `mallopt(M_MMAP_THRESHOLD, 16 KiB)` / `malloc_trim(0)` heap trimming.
+  - Reduced `[stack] Rss` to `<= 32 KiB` by moving `struct app`, `struct mn_tls` (wiped with `mn_secure_zero`), 32 KiB netlink buffers, and transient `mn_addr_set` off the main thread stack, and added `mn_http_parse_in_place()` to avoid duplicate HTTP response body allocations.
+  - Build/soak baseline: `OPT=-Os` for `src/`, `OPT_VENDOR=-O2` for BearSSL, stripped glibc/musl `dist` binaries, `libc=` in `--version`, and dual-track `scripts/soak.py` using `token_file` + full CA bundle + `smaps [stack] Rss`.
 - Version namespaces clarified: `docs/design.md` v1.2 is the design specification version, not a software release. Local `make` now reports `0.0.0-dev`; only the release workflow injects `VERSION=X.Y.Z`. Earlier references to "1.2.0" as a software version were a mistake (the historical commit subject below is kept verbatim).
 
 ### Added

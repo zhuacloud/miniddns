@@ -483,7 +483,7 @@ main()
 
 一次地址变化会产生多条事件（`tentative`→`preferred`、deprecate、临时地址增删）。因此：
 
-- 收到任意事件 → 置 `pending=1`，并把 debounce deadline 设为 `now + debounce_ms`
+- 收到净变化地址事件或允许接口的 `IFF_UP`/`IFF_RUNNING` 状态翻转（或 `if_indextoname` 失败 fail-open）→ 置 `pending=1`，并把 debounce deadline 设为 `now + debounce_ms`；纯 IPv6 RA `IFA_CACHEINFO` 生命周期刷新与排除接口噪声直接过滤，不触发 debounce（v1.3）
 - debounce 窗口内再来的事件 → **重置** deadline（滑窗静默）
 - 窗口静默到期 → 执行一次 cycle，清 `pending`
 - 连续事件导致 deadline 不断后移时，设硬上限 `max_defer = 10 × debounce_ms`，超时强制执行（防止 ISP 抖动导致永不执行）
@@ -526,6 +526,8 @@ cycle(reason):
           log_info("record ... action=update old=%s new=%s provider=%s duration_ms=%d", ...)
   log_info("cycle end ok=%d fail=%d duration_ms=%d next=%s", ok, fail, now_ms()-t0, next_trigger)
 ```
+
+**v1.3 补充（事件短路与退避语义）**：`boot`/`timer`/`retry`/`--once`/`--dry-run` 及携带 `IFF_UP`/`IFF_RUNNING` carrier 翻转的 `event` 必执行完整探测与 `provider_discover`；非 carrier 的 `reason=event` 若本地有效地址快照完全未变化，则跳过远端请求并记录 `debug`，且不修改退避/重试/兜底定时状态。同周期内按地址族缓存 IP 探测结果。
 
 **逐条记录独立成败**：一条记录失败不阻止其他记录继续。整体 cycle 结果用于计算重试退避（`fail > 0` 即整体失败）。
 
@@ -764,7 +766,7 @@ const struct mn_provider_ops *mn_provider_lookup(const char *kind);
 
 | 操作 | HTTP |
 | --- | --- |
-| discover | `GET /client/v4/zones/{zone_id}/dns_records?type={A\|AAAA}&name={fqdn}`<br>取 `result[0]`：`.id`、`.content`。0 条 → `found=0`；>1 条 → log warn 并用第一条 |
+| discover | 单类型：`GET /client/v4/zones/{zone_id}/dns_records?type={A\|AAAA}&name={fqdn}`<br>同周期同 `(provider, name)` 双栈 `A+AAAA` 合并：`GET /client/v4/zones/{zone_id}/dns_records?name={fqdn}&per_page=100`（单周期内存暂存，`result_info.total_pages > 1` 回退带 `type=` 单查，v1.3）<br>各类型取首条 `.id`、`.content`；0 条 → `found=0`；>1 条 → log warn 并用第一条 |
 | update | `PATCH /client/v4/zones/{zone_id}/dns_records/{record_id}`<br>body `{"content":"<ip>"}` —— **只发 content** |
 | create | `POST /client/v4/zones/{zone_id}/dns_records`<br>body `{"type":"A","name":"<fqdn>","content":"<ip>","ttl":60,"proxied":false}` |
 | 认证 | `Authorization: Bearer <token>`。仅 API Token；**不支持** `X-Auth-Email/X-Auth-Key` 全局密钥 |
@@ -812,9 +814,9 @@ const struct mn_provider_ops *mn_provider_lookup(const char *kind);
 
 | 项 | 规格 |
 | --- | --- |
-| 上下文 | `br_ssl_client_context` + `br_x509_minimal_context` + `br_sslio_context`，放在 `struct mn_tls` 里，**不 malloc**（静态分配或调用方提供） |
+| 上下文 | `br_ssl_client_context` + `br_x509_minimal_context` + `br_sslio_context` 置于 `struct mn_tls`（约 23.3 KiB）；v1.3 起采用请求级短生命周期 `calloc` 并在每条退出路径用 `mn_secure_zero()` 擦除后 `free()`，避免永久抬高主线程 `[stack] Rss`（glibc `M_MMAP_THRESHOLD=16 KiB` 下释放即 `munmap` 归还内核） |
 | 套件 | `br_ssl_client_init_full(&sc, &xc, anchors, n_anchors)` |
-| 算法注册 | 必须显式注册，缺一个就“莫名验证失败”：<br>`br_x509_minimal_set_hash(&xc, br_sha256_ID, &br_sha256_vtable)`（同样注册 sha384、sha512、sha1）<br>`br_x509_minimal_set_rsa(&xc, br_rsa_i31_pkcs1_vrfy)`<br>`br_x509_minimal_set_ecdsa(&xc, br_ec_get_default(), br_ecdsa_i31_vrfy_asn1)` |
+| 算法注册 | 必须显式注册，缺一个就“莫名验证失败”：<br>`br_x509_minimal_set_hash(&xc, br_sha256_ID, &br_sha256_vtable)`（同样注册 sha384、sha512、sha1）<br>`br_x509_minimal_set_rsa(&xc, br_rsa_pkcs1_vrfy_get_default())`（64 位自动启用 `i62`，v1.3）<br>`br_x509_minimal_set_ecdsa(&xc, br_ec_get_default(), br_ecdsa_vrfy_asn1_get_default())` |
 | 调用顺序 | `br_ssl_client_init_full(&sc, &xc, anchors, n)`（内部已调用 `br_x509_minimal_init()` 写入信任锚；**0.6 不存在 `br_x509_minimal_set_trust_anchors()`**）→ 显式算法注册（防御性，`init_full` 已注册全套）→ `br_x509_minimal_set_time()` → `br_ssl_engine_set_buffer()` → **最后** `br_ssl_client_reset(&sc, host, 0)`。顺序错了会得到 `BR_ERR_BAD_STATE` |
 | 随机源 | BearSSL 编译宏 `BR_USE_URANDOM`（Linux）；`PrivateDevices=yes` 下 `/dev/urandom` 仍可用。若可用，优先用 `getrandom(2)` 自己的 RNG 适配层（避免对 `/dev` 路径的依赖） |
 | 信任锚 | 直接把 §09 产出的 `br_x509_trust_anchor[]` 作为 `br_ssl_client_init_full()` 的第 3/4 个参数传入（0.6 无独立 setter） |
@@ -898,7 +900,7 @@ Connection: close\r\n
 ### 09.1 解析管线
 
 ```text
-read bundle (≤2 MiB, 整文件读入)        # 路径已按 §03 校验（允许符号链接，校验目标）
+stream bundle (4 KiB 分块 read, 累计 ≤2 MiB)    # 路径已按 §03 校验（允许符号链接，校验目标；v1.3 取消整文件 2 MiB 分配）
   └─ br_pem_decoder_init(&pc)
      br_pem_decoder_setdest(&pc, dest_cb, &st)
      br_pem_decoder_push(&pc, buf, len)         # 分块喂入（不必一次喂完）
@@ -928,7 +930,7 @@ read bundle (≤2 MiB, 整文件读入)        # 路径已按 §03 校验（允�
 
 | 对象 | 归属 |
 | --- | --- |
-| PEM 文件内容 | 本模块 `malloc` 一次，解析完立即 `free` |
+| PEM 读取缓冲 | 4 KiB 栈上分块流式 `read()` 喂给 `br_pem_decoder_push()`，无需整文件 `malloc`（v1.3）；`mn_ca_parse_bundle()` 保留内存入口供单测 |
 | 单张 DER | 本模块临时 buffer，**必须存活到 `get_pkey` 完成后**（`br_x509_decoder` 内部持有输入指针）。上限：单张 ≤ 16 KiB，否则跳过该张并计数 |
 | DN | `br_x509_trust_anchor.dn` 是 **DER 编码的 X.500 name 字节串**（`br_x500_name{data,len}`），不是 32 位字数组。BearSSL 0.6 **没有** `br_x509_decoder_get_dn()`；唯一来源是 `br_x509_decoder_init(&xc, append_dn, ctx)` 注册的 `append_dn(void *ctx, const void *buf, size_t len)` 回调，它**会被多次调用**、每次给出一段 DER 字节。实现必须用 growable 缓冲把各段顺序累加，再把合并后的字节串深拷贝进 arena；`dn_len` 为字节数。 |
 | RSA `n,e` / EC `curve,point` | **必须深拷贝**；`get_pkey()` 返回的指针指向解码上下文/DER，释放后即悬空。EC point 必须保留未压缩格式（包含 `0x04` 前缀），否则验签失败 |
@@ -1316,8 +1318,9 @@ CC      ?= cc
 CSTD    ?= -std=c99
 WARN    ?= -Wall -Wextra -Wno-unused-parameter
 HARDEN  ?= -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -fno-plt
-OPT     ?= -O2
-DEFS    ?= -DBR_USE_URANDOM
+OPT        ?= -Os
+OPT_VENDOR ?= -O2
+DEFS       ?= -DBR_USE_URANDOM
 INC      = -Ithird_party/bearssl/inc -Ithird_party/jsmn -Isrc
 CFLAGS  += $(CSTD) $(WARN) $(HARDEN) $(OPT) $(DEFS) $(INC)   # ★ 必须汇总到 CFLAGS
 LDFLAGS += -pie -Wl,-z,relro,-z,now
@@ -1619,13 +1622,16 @@ This bundle is a FALLBACK. Prefer the system store when available.
 systemctl show -p CPUUsageNSec -p MemoryPeak miniddns
 ```
 
-| 指标 | 阈值 |
-| --- | --- |
-| 常驻 RSS（`MemoryCurrent`） | ≤ 2.5 MB |
-| 峰值（`MemoryPeak`） | ≤ 6 MB（CA 加载 + TLS 握手瞬时） |
-| 24 h 累计 CPU（`CPUUsageNSec`） | ≤ 2 s（`make soak` 在短时冒烟中按同一上限检查） |
-| 稳态写入请求 | 0 次/24 h（IP 不变时） |
-| 静态产物 | ≤ 500 KB |
+| 指标 | musl 静态生产版（推荐） | glibc 动态兼容版 | 备注 |
+| --- | --- | --- | --- |
+| 常驻 cgroup 内存（`MemoryCurrent`） | ≤ 512 KiB | ≤ 640 KiB | 硬上限 ≤ 2.5 MB |
+| 进程常驻集（`VmRSS`） | ≤ 768 KiB | ≤ 2.4 MiB | 硬上限 ≤ 2.5 MB |
+| 进程私有内存（`RssAnon`） | ≤ 256 KiB | ≤ 320 KiB | 稳态波动 ≤ 32 KiB |
+| 主线程栈物理驻留（`smaps [stack] Rss`） | ≤ 32 KiB | ≤ 32 KiB | 不使用虚拟映射 `VmStk` |
+| 峰值（`MemoryPeak` / `VmHWM`） | ≤ 1.0 MiB | ≤ 2.8 MiB | 硬上限 ≤ 6 MB |
+| 24 h 累计 CPU（`CPUUsageNSec`） | ≤ 1.5 s | ≤ 1.5 s | 硬上限 ≤ 2 s |
+| 稳态写入请求 | 0 次/24 h | 0 次/24 h | IP 不变时 |
+| 二进制体积（stripped） | ≤ 380 KB（硬上限 500 KB） | ≤ 320 KB | `make dist` 均 strip |
 
 ### 14.6 代码质量门禁
 
@@ -1820,6 +1826,10 @@ root 模式（默认）：
 
 | 版本 | 变更 |
 | --- | --- |
+| 1.3-M4 | 栈常驻与 HTTP 原地解析瘦身（§08.1 / §08.3）：`struct app`、`struct mn_tls`（退出前 `mn_secure_zero`）、netlink 32 KiB 缓冲、`struct mn_addr_set` 移出栈/长生命周期，改用按需 `calloc`/`free` 与 `realpath(..., NULL)`，收缩 `tls_http`/`prov_cloudflare`/`provider` 栈缓冲并拆分 `tls_build_wire`；新增 `mn_http_parse_in_place()` 消除 HTTP 响应双拷贝与冗余 `raw` 保留 |
+| 1.3-M3 | 文件 I/O 峰值消灭与 glibc 堆治理（§03/§09.1/§09.2）：抽取 `mn_checked_open()`，CA 改为 4 KiB 流式分块解析与 `dn` 缓冲复用（消灭 2 MiB 分配）；token 改用 576 B 栈缓冲读首行（消灭 256 KiB 零填充）；配置改为单次按 `st_size` 精确读取；glibc 路径增加 `mallopt(M_MMAP_THRESHOLD, 16 KiB)` 与 `malloc_trim(0)` |
+| 1.3-M2 | CPU 治理（§05.2/§05.3/§05.4/§07.3/§08.1）：netlink 跟踪 `IFF_UP\|IFF_RUNNING` 并维护地址指纹表拦截 IPv6 RA 纯生命周期刷新与排除接口噪声；非 carrier 的 `reason=event` 无本地变化时跳过远端请求且保留退避状态；cycle 内按族缓存探测；恢复 BearSSL 64 位默认 `i62` RSA 验签；同域名双栈 `A+AAAA` 合并 discover（`per_page=100`，分页自动回退）；`cycle end` 追加 `reason=`/`tls=` |
+| 1.3-M1 | 构建与双轨度量基线（§13.1 / §14.5）：业务代码默认 `OPT=-Os`、BearSSL 保留 `OPT_VENDOR=-O2`，`dist` glibc/musl 均 strip；`--version` 输出 `libc=`；§14.5 细化为 musl/glibc 双轨门禁并以 `smaps [stack] Rss` 替代 `VmStk`；`soak.py` 改用 `token_file` + 全量 CA |
 | 1.2.4 | 版本命名空间澄清（§13.1 / §10.2 / §12.7）：设计规格版本（v1.2）不等于软件版本；本地 `make` 默认构建版本改为 `0.0.0-dev`，发布版本由 release workflow 以 `VERSION=X.Y.Z` 注入；清理正文里把 `1.2.0` 当作软件版本的示例。无功能变更 |
 | 1.2.3 | 打包格式修正（§03 / §13.3）：每个版本发布 8 个 Linux 包（x86/x64/arm32/arm64 × musl/glibc，Zig 交叉编译），产物目录改名为 `miniddns-<version>-linux-<arch>-<libc>/` 并新增根 `README.md`；tar.gz 内为可直接复制到 `/opt` 或 `/usr/local` 的自包含目录结构，**安装脚本/配置示例/服务器配置示例只存在于 tar.gz 内**，Release 只上传 tar.gz 与聚合 `SHA256SUMS`。无运行时行为变更 |
 | 1.2.2 | 打包/发布扩展（§13.3）：明确产物清单必须包含二进制、配置示例、安装脚本与服务器配置示例，新增 `conf/README.md`、`examples/` 与产物清单校验门禁；新增发布流程规范 `docs/RELEASE_PROCESS.md`、CI 与 release workflow、`VERSION` 编译期注入。无运行时行为变更 |
