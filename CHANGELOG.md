@@ -37,6 +37,23 @@
 
 <!-- generated-release-sections -->
 
+## [0.0.1-rc3] - 2026-11-27
+
+**Full Changelog**: https://github.com/zhuacloud/miniddns/compare/0.0.1-rc2...0.0.1-rc3
+
+### Added
+
+- feat: implement v1.3 CPU and memory governance (M1-M4) (58f8efd)
+
+### Fixed
+
+- fix(release): zero gzip mtime in make_source_tarball.py for deterministic sha256 (ee1cfb8)
+
+### Documentation
+
+- docs: add v1.3 baseline and sync specification amendments (7d2882f)
+
+
 ## [0.0.1-rc2] - 2026-11-12
 
 **Full Changelog**: https://github.com/zhuacloud/miniddns/compare/0.0.1-rc1...0.0.1-rc2
