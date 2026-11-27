@@ -307,6 +307,207 @@ static void test_nl_decode(void)
     CHECK(a.if_up == 1 && !strcmp(a.ifname, "lo"),
           "if_indextoname + IFF_UP table: name=%s up=%d", a.ifname, a.if_up);
 
+    /* v1.3 REQ-07: filtered drain suppresses RA IFA_CACHEINFO refresh and noise,
+       while passing real address changes and allowed-interface IFF_RUNNING flips. */
+    {
+        int sv[2];
+        struct mn_nl fnl;
+        struct mn_addr_set snap;
+        struct mn_detect_cfg dcfg;
+        struct {
+            struct nlmsghdr nlh;
+            struct ifinfomsg ifi;
+        } lmsg;
+        char derr[128];
+        int ov = 0, carrier = 0, dr;
+        uint32_t f_norm = 0x100; /* IFA_F_MANAGETEMPADDR */
+        uint32_t f_depr = 0x120; /* + IFA_F_DEPRECATED */
+
+        CHECK(socketpair(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK, 0, sv) == 0,
+              "socketpair for netlink drain filter");
+        if (sv[0] >= 0) {
+            memset(&fnl, 0, sizeof(fnl));
+            memset(&snap, 0, sizeof(snap));
+            memset(&dcfg, 0, sizeof(dcfg));
+            fnl.fd = sv[0];
+            fnl.n_links = 1;
+            fnl.links[0].idx = lo;
+            fnl.links[0].up = 1;
+            fnl.links[0].running = 1;
+            snprintf(fnl.links[0].name, sizeof(fnl.links[0].name), "lo");
+            dcfg.ipv4_mode = MN_IP4_AUTO;
+            dcfg.ipv6_mode = MN_IP6_IFACE;
+            /* allow lo for this synthetic test */
+            snprintf(dcfg.iface_exclude, sizeof(dcfg.iface_exclude), "docker0,veth*");
+
+            snap.n = 1;
+            snap.a[0].family = AF_INET6;
+            memcpy(snap.a[0].bytes, v6, 16);
+            snap.a[0].scope = RT_SCOPE_UNIVERSE;
+            snap.a[0].flags = f_norm;
+            snap.a[0].has_cacheinfo = 1;
+            snap.a[0].valid_lft = 2592000;
+            snap.a[0].ifindex = lo;
+            snap.a[0].if_up = 1;
+            mn_nl_snapshot_fps(&fnl, &snap);
+
+            /* 1) Pure IPv6 RA lifetime refresh (pref/valid updated, same addr+flags) => filtered (0) */
+            memset(&msg, 0, sizeof(msg));
+            off = 0;
+            ci.ifa_prefered = 604800;
+            ci.ifa_valid = 2500000;
+            msg.nlh.nlmsg_type = RTM_NEWADDR;
+            msg.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(msg.ifa));
+            msg.ifa.ifa_family = AF_INET6;
+            msg.ifa.ifa_prefixlen = 64;
+            msg.ifa.ifa_scope = RT_SCOPE_UNIVERSE;
+            msg.ifa.ifa_index = lo;
+            add_rta(msg.attrs, &off, IFA_ADDRESS, v6, sizeof(v6));
+            add_rta(msg.attrs, &off, IFA_FLAGS, &f_norm, sizeof(f_norm));
+            add_rta(msg.attrs, &off, IFA_CACHEINFO, &ci, sizeof(ci));
+            msg.nlh.nlmsg_len += (uint32_t)RTA_ALIGN(off);
+            CHECK(send(sv[1], &msg, msg.nlh.nlmsg_len, 0) == (ssize_t)msg.nlh.nlmsg_len,
+                  "send RA refresh");
+            dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+            CHECK(dr == 0 && ov == 0 && carrier == 0,
+                  "RA pure lifetime refresh filtered: dr=%d ov=%d carrier=%d", dr, ov, carrier);
+
+            /* 2) Flag transition to DEPRECATED => triggers (1) */
+            memset(&msg, 0, sizeof(msg));
+            off = 0;
+            msg.nlh.nlmsg_type = RTM_NEWADDR;
+            msg.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(msg.ifa));
+            msg.ifa.ifa_family = AF_INET6;
+            msg.ifa.ifa_prefixlen = 64;
+            msg.ifa.ifa_scope = RT_SCOPE_UNIVERSE;
+            msg.ifa.ifa_index = lo;
+            add_rta(msg.attrs, &off, IFA_ADDRESS, v6, sizeof(v6));
+            add_rta(msg.attrs, &off, IFA_FLAGS, &f_depr, sizeof(f_depr));
+            add_rta(msg.attrs, &off, IFA_CACHEINFO, &ci, sizeof(ci));
+            msg.nlh.nlmsg_len += (uint32_t)RTA_ALIGN(off);
+            (void)send(sv[1], &msg, msg.nlh.nlmsg_len, 0);
+            dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+            CHECK(dr == 1 && carrier == 0, "DEPRECATED flag change triggers: dr=%d", dr);
+
+            /* 3) valid_lft -> 0 => triggers (1) */
+            memset(&msg, 0, sizeof(msg));
+            off = 0;
+            ci.ifa_prefered = 0;
+            ci.ifa_valid = 0;
+            msg.nlh.nlmsg_type = RTM_NEWADDR;
+            msg.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(msg.ifa));
+            msg.ifa.ifa_family = AF_INET6;
+            msg.ifa.ifa_prefixlen = 64;
+            msg.ifa.ifa_scope = RT_SCOPE_UNIVERSE;
+            msg.ifa.ifa_index = lo;
+            add_rta(msg.attrs, &off, IFA_ADDRESS, v6, sizeof(v6));
+            add_rta(msg.attrs, &off, IFA_FLAGS, &f_norm, sizeof(f_norm));
+            add_rta(msg.attrs, &off, IFA_CACHEINFO, &ci, sizeof(ci));
+            msg.nlh.nlmsg_len += (uint32_t)RTA_ALIGN(off);
+            (void)send(sv[1], &msg, msg.nlh.nlmsg_len, 0);
+            dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+            CHECK(dr == 1, "valid_lft=0 triggers: dr=%d", dr);
+
+            /* 4) Excluded interface (exclude lo) => filtered (0) */
+            snprintf(dcfg.iface_exclude, sizeof(dcfg.iface_exclude), "lo");
+            (void)send(sv[1], &msg, msg.nlh.nlmsg_len, 0);
+            dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+            CHECK(dr == 0, "excluded iface filtered: dr=%d", dr);
+
+            /* 5) RTM_NEWLINK with unchanged IFF_UP|IFF_RUNNING => filtered (0) */
+            snprintf(dcfg.iface_exclude, sizeof(dcfg.iface_exclude), "docker0");
+            memset(&lmsg, 0, sizeof(lmsg));
+            lmsg.nlh.nlmsg_type = RTM_NEWLINK;
+            lmsg.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(lmsg.ifi));
+            lmsg.ifi.ifi_index = (int)lo;
+            lmsg.ifi.ifi_flags = IFF_UP | IFF_RUNNING;
+            (void)send(sv[1], &lmsg, lmsg.nlh.nlmsg_len, 0);
+            dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+            CHECK(dr == 0 && carrier == 0, "unchanged link flags filtered: dr=%d", dr);
+
+            /* 6) RTM_NEWLINK with IFF_RUNNING flip (NAT carrier loss) => triggers + carrier=1 */
+            lmsg.ifi.ifi_flags = IFF_UP; /* RUNNING cleared */
+            (void)send(sv[1], &lmsg, lmsg.nlh.nlmsg_len, 0);
+            dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+            CHECK(dr == 1 && carrier == 1, "IFF_RUNNING flip sets carrier_changed: dr=%d carrier=%d", dr, carrier);
+
+            /* 7) Non-global scope (RT_SCOPE_LINK fe80::1) => filtered (0) */
+            {
+                unsigned char ll6[16];
+                CHECK(inet_pton(AF_INET6, "fe80::1", ll6) == 1, "ll6 fixture");
+                memset(&msg, 0, sizeof(msg));
+                off = 0;
+                msg.nlh.nlmsg_type = RTM_NEWADDR;
+                msg.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(msg.ifa));
+                msg.ifa.ifa_family = AF_INET6;
+                msg.ifa.ifa_prefixlen = 64;
+                msg.ifa.ifa_scope = RT_SCOPE_LINK;
+                msg.ifa.ifa_index = lo;
+                add_rta(msg.attrs, &off, IFA_ADDRESS, ll6, sizeof(ll6));
+                msg.nlh.nlmsg_len += (uint32_t)RTA_ALIGN(off);
+                (void)send(sv[1], &msg, msg.nlh.nlmsg_len, 0);
+                dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+                CHECK(dr == 0, "link-local scope filtered: dr=%d", dr);
+            }
+
+            /* 8) IFA_F_TENTATIVE and IFA_F_TEMPORARY (allow_temporary_ipv6=0) => filtered (0) */
+            {
+                uint32_t f_tent = 0x40; /* IFA_F_TENTATIVE */
+                uint32_t f_temp = 0x01; /* IFA_F_TEMPORARY */
+                unsigned char v6new[16];
+                CHECK(inet_pton(AF_INET6, "2001:4860:4860::9999", v6new) == 1, "v6new fixture");
+                memset(&msg, 0, sizeof(msg));
+                off = 0;
+                msg.nlh.nlmsg_type = RTM_NEWADDR;
+                msg.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(msg.ifa));
+                msg.ifa.ifa_family = AF_INET6;
+                msg.ifa.ifa_prefixlen = 64;
+                msg.ifa.ifa_scope = RT_SCOPE_UNIVERSE;
+                msg.ifa.ifa_index = lo;
+                add_rta(msg.attrs, &off, IFA_ADDRESS, v6new, sizeof(v6new));
+                add_rta(msg.attrs, &off, IFA_FLAGS, &f_tent, sizeof(f_tent));
+                msg.nlh.nlmsg_len += (uint32_t)RTA_ALIGN(off);
+                (void)send(sv[1], &msg, msg.nlh.nlmsg_len, 0);
+                dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+                CHECK(dr == 0, "TENTATIVE v6 filtered: dr=%d", dr);
+
+                memset(&msg, 0, sizeof(msg));
+                off = 0;
+                msg.nlh.nlmsg_type = RTM_NEWADDR;
+                msg.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(msg.ifa));
+                msg.ifa.ifa_family = AF_INET6;
+                msg.ifa.ifa_prefixlen = 64;
+                msg.ifa.ifa_scope = RT_SCOPE_UNIVERSE;
+                msg.ifa.ifa_index = lo;
+                add_rta(msg.attrs, &off, IFA_ADDRESS, v6new, sizeof(v6new));
+                add_rta(msg.attrs, &off, IFA_FLAGS, &f_temp, sizeof(f_temp));
+                msg.nlh.nlmsg_len += (uint32_t)RTA_ALIGN(off);
+                (void)send(sv[1], &msg, msg.nlh.nlmsg_len, 0);
+                dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+                CHECK(dr == 0, "TEMPORARY v6 filtered when disallowed: dr=%d", dr);
+
+                /* 9) Unknown ifindex (if_indextoname fails) => fail-open triggers (1) */
+                memset(&msg, 0, sizeof(msg));
+                off = 0;
+                msg.nlh.nlmsg_type = RTM_NEWADDR;
+                msg.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(msg.ifa));
+                msg.ifa.ifa_family = AF_INET6;
+                msg.ifa.ifa_prefixlen = 64;
+                msg.ifa.ifa_scope = RT_SCOPE_UNIVERSE;
+                msg.ifa.ifa_index = 999999u;
+                add_rta(msg.attrs, &off, IFA_ADDRESS, v6new, sizeof(v6new));
+                add_rta(msg.attrs, &off, IFA_FLAGS, &f_norm, sizeof(f_norm));
+                msg.nlh.nlmsg_len += (uint32_t)RTA_ALIGN(off);
+                (void)send(sv[1], &msg, msg.nlh.nlmsg_len, 0);
+                dr = mn_nl_drain_filtered(&fnl, &dcfg, &ov, &carrier, derr, sizeof(derr));
+                CHECK(dr == 1, "unknown ifindex fails open: dr=%d", dr);
+            }
+
+            close(sv[0]);
+            close(sv[1]);
+        }
+    }
+
     {
         int overflow = 0;
         char err[256];
@@ -664,6 +865,35 @@ static void test_http_parse(void)
     }
     CHECK(!strcmp(mn_tls_version_name(BR_TLS12), "1.2"), "TLS version name 1.2");
     CHECK(!strcmp(mn_tls_version_name(0), "unknown"), "TLS unknown version name");
+
+    /* v1.3 REQ-05: in-place HTTP parser parity across CL, EOF, chunked, errors */
+    {
+        const char *cases[] = { cl, eof, chunked, ra, badchunk, te };
+        int expect_ok[] = { 1, 1, 1, 1, 0, 0 };
+        size_t ci;
+        for (ci = 0; ci < sizeof(cases) / sizeof(cases[0]); ++ci) {
+            size_t clen = strlen(cases[ci]);
+            char *heap_buf = (char *)malloc(clen + 1);
+            struct mn_http_result r1, r2;
+            int ec1 = 0, ec2 = 0, rc1, rc2;
+            char e1[128], e2[128];
+            CHECK(heap_buf != NULL, "in-place alloc case %zu", ci);
+            if (!heap_buf) continue;
+            memcpy(heap_buf, cases[ci], clen + 1);
+            rc1 = mn_http_parse_raw(cases[ci], clen, &r1, &ec1, e1, sizeof(e1));
+            rc2 = mn_http_parse_in_place(&heap_buf, clen, &r2, &ec2, e2, sizeof(e2));
+            CHECK(heap_buf == NULL && rc1 == rc2 && ec1 == ec2 && (rc2 == 0) == expect_ok[ci],
+                  "in-place case %zu rc1=%d rc2=%d", ci, rc1, rc2);
+            if (rc1 == 0 && rc2 == 0) {
+                CHECK(r1.status == r2.status && r1.body_len == r2.body_len
+                      && r1.retry_after_secs == r2.retry_after_secs
+                      && !strcmp(r1.body, r2.body),
+                      "in-place parity case %zu body='%s'", ci, r2.body ? r2.body : "");
+            }
+            mn_http_result_free(&r1);
+            mn_http_result_free(&r2);
+        }
+    }
 }
 
 /* ----------------------------------------------------------- json_util */
@@ -690,6 +920,28 @@ static void test_json(void)
     rc = mn_cf_parse("{oops", 5, &success, id, sizeof(id), content, sizeof(content),
                      &nres, code, sizeof(code), msg, sizeof(msg), err, sizeof(err));
     CHECK(rc == E_PARSE, "malformed JSON rejected");
+
+    /* v1.3 REQ-08: dual-stack A + AAAA single-GET parser + pagination detection */
+    {
+        struct mn_cf_dual_result dual;
+        const char *dual_ok =
+            "{\"success\":true,\"result\":["
+            "{\"id\":\"txt1\",\"type\":\"TXT\",\"content\":\"v=spf1\"},"
+            "{\"id\":\"id-a1\",\"type\":\"A\",\"content\":\"203.0.113.1\"},"
+            "{\"id\":\"id-v6\",\"type\":\"AAAA\",\"content\":\"2001:db8::1\"},"
+            "{\"id\":\"id-a2\",\"type\":\"A\",\"content\":\"203.0.113.2\"}"
+            "],\"result_info\":{\"page\":1,\"total_pages\":1},\"errors\":[]}";
+        const char *dual_paged =
+            "{\"success\":true,\"result\":[],\"result_info\":{\"page\":1,\"total_pages\":2},\"errors\":[]}";
+        rc = mn_cf_parse_dual(dual_ok, strlen(dual_ok), &dual, err, sizeof(err));
+        CHECK(rc == MN_OK && dual.success == 1 && dual.total_pages == 1
+              && dual.n_a == 2 && !strcmp(dual.a_id, "id-a1") && !strcmp(dual.a_content, "203.0.113.1")
+              && dual.n_aaaa == 1 && !strcmp(dual.aaaa_id, "id-v6") && !strcmp(dual.aaaa_content, "2001:db8::1"),
+              "cf dual parse A+AAAA: rc=%d na=%d n6=%d", rc, dual.n_a, dual.n_aaaa);
+        rc = mn_cf_parse_dual(dual_paged, strlen(dual_paged), &dual, err, sizeof(err));
+        CHECK(rc == MN_OK && dual.total_pages == 2,
+              "cf dual parse total_pages=2: rc=%d tp=%d", rc, dual.total_pages);
+    }
 }
 
 /* -------------------------------------------------------------- ca load */
@@ -746,6 +998,67 @@ static void test_ca(void)
             }
             mn_ca_free(&ca);
         }
+        /* v1.3 REQ-03: streaming 4 KiB CA loader matches full-buffer parser across chunk boundaries */
+        snprintf(path, sizeof(path), "%.400s/../ca/ca-certificates.crt", root);
+        if (access(path, F_OK) == 0) {
+            char *full = (char *)malloc(MN_LIMIT_CA_FILE + 1);
+            CHECK(full != NULL, "alloc full CA bundle for parity test");
+            if (full && read_file(path, full, MN_LIMIT_CA_FILE + 1) == 0) {
+                br_x509_trust_anchor *ta2 = NULL;
+                void *arena2 = NULL;
+                size_t n2 = 0, got2 = 0;
+                struct mn_ca_info info2;
+                memset(&info2, 0, sizeof(info2));
+                memset(&ca, 0, sizeof(ca));
+                CHECK(mn_ca_parse_bundle(full, strlen(full), &ta2, &n2, &arena2, &info2,
+                                         err, sizeof(err)) == 0,
+                      "full CA bundle parse: %s", err);
+                /* Put a symlink inside tests/ca -> real bundle so whitelist allows it */
+                {
+                    char linkp[MN_PATH_MAX];
+                    snprintf(linkp, sizeof(linkp), "%.400s/ca/stream-test.crt", root);
+                    unlink(linkp);
+                    if (symlink(path, linkp) == 0) {
+                        /* symlink resolves outside tests/ca -> rejected unless copied; test copy */
+                        unlink(linkp);
+                    }
+                    {
+                        FILE *out = fopen(linkp, "wb");
+                        if (out) {
+                            fwrite(full, 1, strlen(full), out);
+                            fclose(out);
+                            chmod(linkp, 0644);
+                            CHECK(mn_ca_init(&ca, linkp, 1, err, sizeof(err)) == 0,
+                                  "streaming CA init multi-cert (>4KiB): %s", err);
+                            mn_ca_current(&ca, &got2);
+                            CHECK(got2 == n2 && got2 > 50,
+                                  "streaming CA count matches buffer parse: stream=%zu buf=%zu",
+                                  got2, n2);
+                            /* Reload failure on corrupted bundle keeps old anchors */
+                            {
+                                FILE *badf = fopen(linkp, "wb");
+                                if (badf) {
+                                    fputs("not a valid pem\n", badf);
+                                    fclose(badf);
+                                    chmod(linkp, 0644);
+                                    CHECK(mn_ca_refresh(&ca) == 0,
+                                          "streaming CA refresh failure keeps old anchors");
+                                    got2 = 0;
+                                    mn_ca_current(&ca, &got2);
+                                    CHECK(got2 == n2,
+                                          "old anchors preserved after failed reload: %zu vs %zu",
+                                          got2, n2);
+                                }
+                            }
+                            mn_ca_free(&ca);
+                            unlink(linkp);
+                        }
+                    }
+                }
+                free(arena2);
+            }
+            free(full);
+        }
     }
 }
 
@@ -760,6 +1073,93 @@ static void test_provider(void)
               && (ops->caps & MN_CAP_DISCOVER), "CF capabilities");
     }
     CHECK(mn_provider_lookup("desec") == NULL, "only cloudflare in v1");
+
+    /* v1.3 REQ-03: token_file bounded read rejects >MN_TOKEN_MAX-1 token line */
+    {
+        FILE *f = fopen("tmp/long.token", "wb");
+        char bigtok[MN_TOKEN_MAX + 32];
+        char err[256];
+        struct mn_cfg cfg;
+        struct mn_provider provs[1];
+        memset(bigtok, 'T', sizeof(bigtok));
+        bigtok[sizeof(bigtok) - 1] = '\n';
+        CHECK(f != NULL, "long.token created");
+        if (f) {
+            fwrite(bigtok, 1, sizeof(bigtok), f);
+            fclose(f);
+            chmod("tmp/long.token", 0600);
+            mn_cfg_defaults(&cfg, ".");
+            cfg.allow_non_root_owner = 1;
+            cfg.n_providers = 1;
+            snprintf(cfg.providers[0].id, sizeof(cfg.providers[0].id), "cf");
+            snprintf(cfg.providers[0].kind, sizeof(cfg.providers[0].kind), "cloudflare");
+            snprintf(cfg.providers[0].token_file, sizeof(cfg.providers[0].token_file), "tmp/long.token");
+            memset(provs, 0, sizeof(provs));
+            CHECK(mn_provider_init_all(&cfg, provs, 1, 0, err, sizeof(err)) != 0
+                  && strstr(err, "token_too_long") != NULL,
+                  "oversized token line rejected: %s", err);
+            unlink("tmp/long.token");
+        }
+    }
+
+    /* v1.3 REQ-08: dual-stack cycle_begin handles AAAA declared before A across multiple names */
+    if (ops && ops->cycle_begin && ops->cycle_end) {
+        struct mn_cfg cfg;
+        struct mn_provider p;
+        mn_cfg_defaults(&cfg, ".");
+        cfg.n_records = 4;
+        snprintf(cfg.records[0].provider_id, sizeof(cfg.records[0].provider_id), "cf");
+        snprintf(cfg.records[0].name, sizeof(cfg.records[0].name), "first.example.com");
+        cfg.records[0].family = AF_INET6;
+        cfg.records[0].enabled = 1;
+        snprintf(cfg.records[1].provider_id, sizeof(cfg.records[1].provider_id), "cf");
+        snprintf(cfg.records[1].name, sizeof(cfg.records[1].name), "first.example.com");
+        cfg.records[1].family = AF_INET;
+        cfg.records[1].enabled = 1;
+        snprintf(cfg.records[2].provider_id, sizeof(cfg.records[2].provider_id), "cf");
+        snprintf(cfg.records[2].name, sizeof(cfg.records[2].name), "second.example.com");
+        cfg.records[2].family = AF_INET;
+        cfg.records[2].enabled = 1;
+        snprintf(cfg.records[3].provider_id, sizeof(cfg.records[3].provider_id), "cf");
+        snprintf(cfg.records[3].name, sizeof(cfg.records[3].name), "second.example.com");
+        cfg.records[3].family = AF_INET6;
+        cfg.records[3].enabled = 1;
+        memset(&p, 0, sizeof(p));
+        p.id = "cf";
+        p.ops = ops;
+        ops->cycle_begin(&p, &cfg);
+        CHECK(p.priv != NULL, "cf_cycle_begin initializes dual-stack cache when AAAA precedes A");
+        ops->cycle_end(&p);
+        CHECK(p.priv == NULL, "cf_cycle_end clears dual-stack cache");
+    }
+
+    /* v1.3 REQ-07: quiet local snapshot detection emits zero logs on NAT private IPv4 */
+    {
+        struct mn_cfg cfg;
+        struct mn_addr_set set;
+        struct mn_detect_result r4, r6;
+        uint64_t sig = 0;
+        unsigned char priv4[4] = { 192, 168, 1, 50 };
+        mn_cfg_defaults(&cfg, ".");
+        cfg.detect.ipv4_mode = MN_IP4_EXTERNAL;
+        memset(&set, 0, sizeof(set));
+        set.n = 1;
+        set.a[0].family = AF_INET;
+        memcpy(set.a[0].bytes, priv4, 4);
+        set.a[0].scope = RT_SCOPE_UNIVERSE;
+        set.a[0].ifindex = 2;
+        set.a[0].if_up = 1;
+        snprintf(set.a[0].ifname, sizeof(set.a[0].ifname), "eth0");
+        cap_n = 0;
+        mn_log_set_sink(sink, NULL);
+        mn_log_init(MN_LOG_DEBUG, MN_LOG_JOURNALD, NULL);
+        CHECK(mn_detect_ipv4_iface_only(&cfg, &set, &r4, &sig) == E_NO_IP && sig != 0,
+              "external mode iface_only returns E_NO_IP with non-zero v4_if_sig");
+        CHECK(mn_detect_ipv6_quiet(&cfg, &set, &r6) == E_NO_IP,
+              "ipv6_quiet returns E_NO_IP when no v6 present");
+        CHECK(cap_n == 0, "quiet local snap emits zero logs, got %d", cap_n);
+        mn_log_set_sink(NULL, NULL);
+    }
 }
 
 int main(void)

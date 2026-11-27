@@ -156,6 +156,11 @@ if [ ! -f "$SYSCONFDIR/miniddns.conf" ]; then
     echo "WARN: $SYSCONFDIR/miniddns.conf does not exist yet — the service will fail with E_CFG until step 1 is done." >&2
 fi
 echo "NOTE: install.sh does NOT enable/start the service (config is not filled yet)."
+if command -v readelf >/dev/null 2>&1; then
+    if readelf -l "$BINDIR/miniddns" 2>/dev/null | grep -q 'INTERP'; then
+        echo "NOTE: installed binary is dynamically linked (glibc); for ~2 MiB lower VmRSS prefer the musl static tarball."
+    fi
+fi
 
 if [ "$NO_SYSTEMD" -eq 0 ]; then
     TIMEOUT=""

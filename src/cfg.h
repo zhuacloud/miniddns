@@ -12,6 +12,10 @@ void mn_cfg_defaults(struct mn_cfg *cfg, const char *root);
    (missing $CREDENTIALS_DIRECTORY is a warn, not E_CFG, see §04.4/§09.6) */
 int mn_cfg_load(const char *cli_path, int diagnostic, int allow_non_root_owner,
                 struct mn_cfg *cfg, char *err, size_t errlen);
+/* Extended loader: sets *io_err=1 when opening/reading/checking permissions failed
+   (distinguishes CLI exit code 2 from syntax/validation failure without double-reading). */
+int mn_cfg_load_ex(const char *cli_path, int diagnostic, int allow_non_root_owner,
+                   struct mn_cfg *cfg, int *io_err, char *err, size_t errlen);
 
 /* normalized --check-config output; token/zone_id masked */
 void mn_cfg_print(const struct mn_cfg *cfg);

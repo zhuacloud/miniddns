@@ -182,19 +182,23 @@ int mn_resolve_ca_path(const struct mn_cfg *cfg, char *out, size_t cap,
 }
 
 /* §03 graded symlink policy + size/owner/mode checks.
-   Returns 0 ok, -1 otherwise (err describes which check failed). */
-int mn_checked_read(const char *path, int cls, char *buf, size_t cap,
-                    size_t *len, int allow_non_root_owner,
+   Returns fd >= 0 on success (caller owns fd), -1 on failure. */
+int mn_checked_open(const char *path, int cls, int allow_non_root_owner,
+                    size_t *out_size, struct stat *out_st,
+                    char *real_out, size_t real_cap,
                     char *err, size_t errlen)
 {
-    char resolved[PATH_MAX], real[MN_PATH_MAX];
+    char real[MN_PATH_MAX];
+    char *resolved = NULL;
     struct stat st;
     int fd;
-    size_t total = 0, maxsize, maxread;
+    size_t maxsize;
     const char *obj = (cls == MN_FILE_TOKEN) ? "token" : (cls == MN_FILE_CA ? "ca" : "config");
 
-    if (!path || !path[0] || !buf || cap == 0) {
-        set_err(err, errlen, "%s: empty path or buffer", obj); return -1;
+    if (out_size) *out_size = 0;
+    if (real_out && real_cap > 0) real_out[0] = '\0';
+    if (!path || !path[0]) {
+        set_err(err, errlen, "%s: empty path", obj); return -1;
     }
     maxsize = (cls == MN_FILE_CA) ? MN_LIMIT_CA_FILE : MN_LIMIT_CONF_FILE;
     if (cls == MN_FILE_TOKEN) maxsize = MN_LIMIT_TOKEN_FILE;
@@ -206,18 +210,28 @@ int mn_checked_read(const char *path, int cls, char *buf, size_t cap,
                     (errno == ELOOP ? " (symlink rejected)" : ""));
             return -1;
         }
-        if (snprintf(real, sizeof(real), "%s", path) >= (int)sizeof(real)) { close(fd); return -1; }
+        if (snprintf(real, sizeof(real), "%s", path) >= (int)sizeof(real)) {
+            set_err(err, errlen, "token: path too long");
+            close(fd); return -1;
+        }
     } else {
-        if (!realpath(path, resolved)) {
+        resolved = realpath(path, NULL);
+        if (!resolved) {
             set_err(err, errlen, "%s: realpath failed path=%s errno=%d", obj, path, errno);
             return -1;
         }
         fd = open(resolved, O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
             set_err(err, errlen, "%s: open failed path=%s errno=%d", obj, resolved, errno);
+            free(resolved);
             return -1;
         }
-        if (mn_strlcpy(real, sizeof(real), resolved) != 0) { close(fd); return -1; }
+        if (mn_strlcpy(real, sizeof(real), resolved) != 0) {
+            set_err(err, errlen, "%s: resolved path too long", obj);
+            free(resolved);
+            close(fd); return -1;
+        }
+        free(resolved);
     }
 
     if (fstat(fd, &st) != 0) {
@@ -236,13 +250,9 @@ int mn_checked_read(const char *path, int cls, char *buf, size_t cap,
         set_err(err, errlen, "%s: group/world writable path=%s", obj, real);
         close(fd); return -1;
     }
-    if ((size_t)st.st_size > maxsize) {
+    if (st.st_size < 0 || (size_t)st.st_size > maxsize) {
         set_err(err, errlen, "%s: file too large path=%s size=%lld limit=%zu", obj, real,
                 (long long)st.st_size, maxsize);
-        close(fd); return -1;
-    }
-    if ((size_t)st.st_size >= cap) {
-        set_err(err, errlen, "%s: read buffer too small path=%s", obj, real);
         close(fd); return -1;
     }
     /* §03: CA bundle realpath must stay inside trusted directories. */
@@ -258,6 +268,41 @@ int mn_checked_read(const char *path, int cls, char *buf, size_t cap,
             set_err(err, errlen, "ca: path outside whitelist path=%s", real);
             close(fd); return -1;
         }
+    }
+    if (real_out && real_cap > 0) {
+        if (mn_strlcpy(real_out, real_cap, real) != 0) {
+            set_err(err, errlen, "%s: resolved path too long", obj);
+            close(fd); return -1;
+        }
+    }
+    if (out_size) *out_size = (size_t)st.st_size;
+    if (out_st) *out_st = st;
+    return fd;
+}
+
+/* §03 graded symlink policy + size/owner/mode checks.
+   Returns 0 ok, -1 otherwise (err describes which check failed). */
+int mn_checked_read(const char *path, int cls, char *buf, size_t cap,
+                    size_t *len, int allow_non_root_owner,
+                    char *err, size_t errlen)
+{
+    char real[MN_PATH_MAX];
+    int fd;
+    size_t fsize = 0, total = 0, maxsize, maxread;
+    const char *obj = (cls == MN_FILE_TOKEN) ? "token" : (cls == MN_FILE_CA ? "ca" : "config");
+
+    if (!path || !path[0] || !buf || cap == 0) {
+        set_err(err, errlen, "%s: empty path or buffer", obj); return -1;
+    }
+    maxsize = (cls == MN_FILE_CA) ? MN_LIMIT_CA_FILE : MN_LIMIT_CONF_FILE;
+    if (cls == MN_FILE_TOKEN) maxsize = MN_LIMIT_TOKEN_FILE;
+
+    fd = mn_checked_open(path, cls, allow_non_root_owner, &fsize, NULL,
+                         real, sizeof(real), err, errlen);
+    if (fd < 0) return -1;
+    if (fsize >= cap) {
+        set_err(err, errlen, "%s: read buffer too small path=%s", obj, real);
+        close(fd); return -1;
     }
 
     maxread = cap - 1;

@@ -5,6 +5,7 @@
 #include "tls_http.h"
 #include "util.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -12,12 +13,13 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <time.h>
+#include <unistd.h>
 
 extern const struct mn_provider_ops mn_cloudflare_ops;
 
 #define MN_PROV_ESC_CAP     (MN_LOG_FIELD_MAX + 1)
-#define MN_PROV_DETAIL_CAP  MN_LOG_LINE_MAX
-#define MN_PROV_LOCAL_ERR   512
+#define MN_PROV_DETAIL_CAP  256
+#define MN_PROV_LOCAL_ERR   256
 
 static int prov_lower(int c)
 {
@@ -213,12 +215,19 @@ static const char *prov_next_reason(const char *reason)
     return "event";
 }
 
-static void prov_log_cycle_end(int ok, int fail, int64_t duration, const char *next)
+static void prov_log_cycle_end(int ok, int fail, int64_t duration,
+                               const char *next, const char *reason,
+                               unsigned tls_count)
 {
     char next_esc[MN_PROV_ESC_CAP];
+    char reason_esc[MN_PROV_ESC_CAP];
 
-    mn_log(MN_LOG_INFO, "cycle end ok=%d fail=%d duration_ms=%" PRId64 " next=%s",
-           ok, fail, duration, prov_escape(next_esc, sizeof(next_esc), next));
+    mn_log(MN_LOG_INFO,
+           "cycle end ok=%d fail=%d duration_ms=%" PRId64 " next=%s reason=%s tls=%u",
+           ok, fail, duration,
+           prov_escape(next_esc, sizeof(next_esc), next),
+           prov_escape(reason_esc, sizeof(reason_esc), reason != NULL ? reason : "event"),
+           tls_count);
 }
 
 const struct mn_provider_ops *mn_provider_lookup(const char *kind)
@@ -464,10 +473,10 @@ static int prov_resolve_token(struct mn_cfg *cfg, struct mn_provider *p,
     char path[MN_PATH_MAX];
     char suberr[MN_PROV_DETAIL_CAP];
     char detail[MN_PROV_DETAIL_CAP];
-    char *raw = NULL;
-    size_t raw_cap = (size_t)MN_LIMIT_TOKEN_FILE + 1u;
+    char raw[MN_TOKEN_MAX + 64];
     size_t raw_len = 0;
     size_t i;
+    int fd;
     int local_skipped = 0;
     int has_file;
     int has_inline;
@@ -507,51 +516,77 @@ static int prov_resolve_token(struct mn_cfg *cfg, struct mn_provider *p,
                    "provider id=%s line=%d token_file_skipped=1 reason=credentials_directory_missing diagnostic=%d",
                    id, pc->line, diagnostic);
         } else {
-            raw = (char *)malloc(raw_cap);
-            if (raw == NULL) {
-                prov_set_err(err, errlen,
-                             "reason=out_of_memory provider_id=%s line=%d",
-                             id, pc->line);
-                return E_CFG;
-            }
-            memset(raw, 0, raw_cap);
+            int saw_eol = 0;
+
+            memset(raw, 0, sizeof(raw));
             suberr[0] = '\0';
-            rc = mn_checked_read(path, MN_FILE_TOKEN, raw, raw_cap, &raw_len,
-                                 cfg->allow_non_root_owner, suberr, sizeof(suberr));
-            if (rc < 0) {
+            fd = mn_checked_open(path, MN_FILE_TOKEN, cfg->allow_non_root_owner,
+                                 NULL, NULL, NULL, 0, suberr, sizeof(suberr));
+            if (fd < 0) {
                 prov_single_line(detail, sizeof(detail), suberr);
                 prov_set_err(err, errlen,
                              "reason=token_file_read provider_id=%s line=%d %s",
                              id, pc->line, detail);
-                mn_secure_zero(raw, raw_cap);
-                free(raw);
                 return E_CFG;
             }
-            if (raw_len >= raw_cap) {
-                prov_set_err(err, errlen,
-                             "reason=token_file_too_large provider_id=%s line=%d",
-                             id, pc->line);
-                mn_secure_zero(raw, raw_cap);
-                free(raw);
-                return E_CFG;
-            }
-            raw[raw_len] = '\0';
-            for (i = 0; i < raw_len; ++i) {
-                if (raw[i] == '\n' || raw[i] == '\r') {
-                    raw[i] = '\0';
-                    break;
+            raw_len = 0;
+            while (raw_len < sizeof(raw) - 1u && !saw_eol) {
+                ssize_t r = read(fd, raw + raw_len, sizeof(raw) - 1u - raw_len);
+                if (r < 0) {
+                    if (errno == EINTR) continue;
+                    close(fd);
+                    mn_secure_zero(raw, sizeof(raw));
+                    prov_set_err(err, errlen,
+                                 "reason=token_file_read provider_id=%s line=%d errno=%d",
+                                 id, pc->line, errno);
+                    return E_CFG;
+                }
+                if (r == 0) break;
+                for (i = 0; i < (size_t)r; ++i) {
+                    if (raw[raw_len + i] == '\n' || raw[raw_len + i] == '\r') {
+                        raw[raw_len + i] = '\0';
+                        raw_len += i;
+                        saw_eol = 1;
+                        break;
+                    }
+                }
+                if (!saw_eol) {
+                    raw_len += (size_t)r;
                 }
             }
+            if (!saw_eol && raw_len == sizeof(raw) - 1u) {
+                unsigned char extra;
+                ssize_t r;
+                do {
+                    r = read(fd, &extra, 1);
+                } while (r < 0 && errno == EINTR);
+                if (r < 0) {
+                    close(fd);
+                    mn_secure_zero(raw, sizeof(raw));
+                    prov_set_err(err, errlen,
+                                 "reason=token_file_read provider_id=%s line=%d errno=%d",
+                                 id, pc->line, errno);
+                    return E_CFG;
+                }
+                if (r > 0 && extra != '\n' && extra != '\r') {
+                    close(fd);
+                    mn_secure_zero(raw, sizeof(raw));
+                    prov_set_err(err, errlen,
+                                 "reason=token_too_long provider_id=%s line=%d",
+                                 id, pc->line);
+                    return E_CFG;
+                }
+            }
+            close(fd);
+            raw[raw_len] = '\0';
             if (mn_strlcpy(p->token, sizeof(p->token), mn_trim(raw)) < 0) {
                 prov_set_err(err, errlen,
                              "reason=token_too_long provider_id=%s line=%d",
                              id, pc->line);
-                mn_secure_zero(raw, raw_cap);
-                free(raw);
+                mn_secure_zero(raw, sizeof(raw));
                 return E_CFG;
             }
-            mn_secure_zero(raw, raw_cap);
-            free(raw);
+            mn_secure_zero(raw, sizeof(raw));
         }
     } else if (has_inline) {
         if (mn_strlcpy(p->token, sizeof(p->token), pc->token_inline) < 0) {
@@ -680,6 +715,7 @@ int mn_cycle(struct mn_cycle_ctx *ctx, const char *reason,
     size_t n_records;
     size_t i;
 
+    mn_tls_counter_reset();
     mn_log(MN_LOG_INFO, "cycle start reason=%s",
            prov_escape(reason_esc, sizeof(reason_esc), reason_value));
     if (ok_count != NULL) {
@@ -692,7 +728,7 @@ int mn_cycle(struct mn_cycle_ctx *ctx, const char *reason,
         *duration_ms = 0;
     }
     if (ctx == NULL || ctx->cfg == NULL) {
-        prov_log_cycle_end(0, 1, 0, "event");
+        prov_log_cycle_end(0, 1, 0, "event", reason_value, 0);
         mn_log_repeat_flush();
         return 1;
     }
@@ -708,56 +744,87 @@ int mn_cycle(struct mn_cycle_ctx *ctx, const char *reason,
         if (duration_ms != NULL) {
             *duration_ms = duration;
         }
-        prov_log_cycle_end(0, 0, duration, "clock");
+        prov_log_cycle_end(0, 0, duration, "clock", reason_value, 0);
         mn_log_repeat_flush();
         return 0;
+    }
+
+    if (ctx->provs != NULL) {
+        for (i = 0; i < ctx->n_provs; ++i) {
+            if (ctx->provs[i].ops != NULL && ctx->provs[i].ops->cycle_begin != NULL) {
+                ctx->provs[i].ops->cycle_begin(&ctx->provs[i], ctx->cfg);
+            }
+        }
     }
 
     n_records = ctx->cfg->n_records;
     if (n_records > MN_MAX_RECORDS) {
         n_records = MN_MAX_RECORDS;
     }
-    for (i = 0; i < n_records; ++i) {
-        struct mn_record_cfg *rec = &ctx->cfg->records[i];
-        struct mn_provider *prov;
-        struct mn_detect_result det;
-        struct mn_remote remote;
-        char errbuf[MN_PROV_LOCAL_ERR];
-        char name[MN_PROV_ESC_CAP];
-        char want[MN_PROV_ESC_CAP];
-        char old[MN_PROV_ESC_CAP];
-        char id[MN_PROV_ESC_CAP];
-        char kind[MN_PROV_ESC_CAP];
-        char fold_key[64];
-        char normalized[MN_IP_STRLEN];
-        const char *type;
-        int drc;
-        int prc;
-        int errcode = MN_OK;
-        int same = 0;
-        int64_t op_t0;
-        int64_t op_ms;
+    {
+        int have_v4_det = 0, have_v6_det = 0;
+        int drc4 = E_NO_IP, drc6 = E_NO_IP;
+        struct mn_detect_result det4, det6;
+        char err4[MN_PROV_LOCAL_ERR], err6[MN_PROV_LOCAL_ERR];
 
-        if (!rec->enabled) {
-            continue;
-        }
-        type = prov_record_type(rec->family);
-        prov_escape(name, sizeof(name), rec->name);
-        errbuf[0] = '\0';
-        memset(&det, 0, sizeof(det));
-        if (rec->family != AF_INET && rec->family != AF_INET6) {
-            prov_log_error(rec, E_CFG, "reason=bad_family");
-            ++fail;
-            prov_cycle_failure(ctx, E_CFG, E_CFG);
-            continue;
-        }
-        if (rec->family == AF_INET) {
-            drc = mn_detect_ipv4(ctx->cfg, ctx->addrs, ctx->ca, &det,
-                                 errbuf, sizeof(errbuf));
-        } else {
-            drc = mn_detect_ipv6(ctx->cfg, ctx->addrs, &det,
-                                 errbuf, sizeof(errbuf));
-        }
+        memset(&det4, 0, sizeof(det4));
+        memset(&det6, 0, sizeof(det6));
+        err4[0] = '\0';
+        err6[0] = '\0';
+
+        for (i = 0; i < n_records; ++i) {
+            struct mn_record_cfg *rec = &ctx->cfg->records[i];
+            struct mn_provider *prov;
+            struct mn_detect_result det;
+            struct mn_remote remote;
+            char errbuf[MN_PROV_LOCAL_ERR];
+            char name[MN_PROV_ESC_CAP];
+            char want[MN_PROV_ESC_CAP];
+            char old[MN_PROV_ESC_CAP];
+            char id[MN_PROV_ESC_CAP];
+            char kind[MN_PROV_ESC_CAP];
+            char fold_key[64];
+            char normalized[MN_IP_STRLEN];
+            const char *type;
+            int drc;
+            int prc;
+            int errcode = MN_OK;
+            int same = 0;
+            int64_t op_t0;
+            int64_t op_ms;
+
+            if (!rec->enabled) {
+                continue;
+            }
+            type = prov_record_type(rec->family);
+            prov_escape(name, sizeof(name), rec->name);
+            errbuf[0] = '\0';
+            memset(&det, 0, sizeof(det));
+            if (rec->family != AF_INET && rec->family != AF_INET6) {
+                prov_log_error(rec, E_CFG, "reason=bad_family");
+                ++fail;
+                prov_cycle_failure(ctx, E_CFG, E_CFG);
+                continue;
+            }
+            if (rec->family == AF_INET) {
+                if (!have_v4_det) {
+                    drc4 = mn_detect_ipv4(ctx->cfg, ctx->addrs, ctx->ca, &det4,
+                                          err4, sizeof(err4));
+                    have_v4_det = 1;
+                }
+                drc = drc4;
+                det = det4;
+                (void)mn_strlcpy(errbuf, sizeof(errbuf), err4);
+            } else {
+                if (!have_v6_det) {
+                    drc6 = mn_detect_ipv6(ctx->cfg, ctx->addrs, &det6,
+                                          err6, sizeof(err6));
+                    have_v6_det = 1;
+                }
+                drc = drc6;
+                det = det6;
+                (void)mn_strlcpy(errbuf, sizeof(errbuf), err6);
+            }
         if (drc == E_NO_IP) {
             const char *key;
             if (rec->family == AF_INET && ctx->cfg->detect.ipv4_mode == MN_IP4_OFF) {
@@ -915,6 +982,15 @@ int mn_cycle(struct mn_cycle_ctx *ctx, const char *reason,
                name, type, old, want, kind, op_ms);
         ++ok;
     }
+    }
+
+    if (ctx->provs != NULL) {
+        for (i = 0; i < ctx->n_provs; ++i) {
+            if (ctx->provs[i].ops != NULL && ctx->provs[i].ops->cycle_end != NULL) {
+                ctx->provs[i].ops->cycle_end(&ctx->provs[i]);
+            }
+        }
+    }
 
     duration = prov_elapsed_ms(t0);
     if (ok_count != NULL) {
@@ -926,7 +1002,7 @@ int mn_cycle(struct mn_cycle_ctx *ctx, const char *reason,
     if (duration_ms != NULL) {
         *duration_ms = duration;
     }
-    prov_log_cycle_end(ok, fail, duration, next);
+    prov_log_cycle_end(ok, fail, duration, next, reason_value, mn_tls_counter_get());
     mn_log_repeat_flush();
     return fail == 0 ? 0 : 1;
 }

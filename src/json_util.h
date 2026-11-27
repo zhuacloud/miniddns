@@ -36,4 +36,22 @@ int mn_cf_parse(const char *body, size_t len, int *success,
                 char *api_msg, size_t msgcap,
                 char *err, size_t errlen);
 
+/* Cloudflare dual-stack (A + AAAA) single-GET response parser (v1.3 REQ-08). */
+struct mn_cf_dual_result {
+    int  success;
+    int  total_pages;
+    int  n_a;
+    char a_id[MN_ID_MAX];
+    char a_content[MN_IP_STRLEN];
+    int  n_aaaa;
+    char aaaa_id[MN_ID_MAX];
+    char aaaa_content[MN_IP_STRLEN];
+    char api_code[64];
+    char api_msg[MN_LOG_FIELD_MAX + 1];
+};
+
+int mn_cf_parse_dual(const char *body, size_t len,
+                     struct mn_cf_dual_result *out,
+                     char *err, size_t errlen);
+
 #endif /* MN_JSON_UTIL_H */

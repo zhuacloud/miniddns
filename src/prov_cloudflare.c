@@ -8,13 +8,15 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 
-#define MN_CF_ESC_CAP       (MN_LOG_FIELD_MAX * 2 + 16)
-#define MN_CF_DETAIL_CAP    MN_LOG_LINE_MAX
-#define MN_CF_PATH_CAP      1024
-#define MN_CF_BODY_CAP      1024
+#define MN_CF_ESC_CAP       (MN_LOG_FIELD_MAX + 1)
+#define MN_CF_DETAIL_CAP    256
+#define MN_CF_PATH_CAP      512
+#define MN_CF_BODY_CAP      512
 #define MN_CF_AUTH_CAP      (MN_TOKEN_MAX + 64)
 #define MN_CF_API_CODE_CAP  64
 #define MN_CF_API_MSG_CAP   (MN_LOG_FIELD_MAX + 1)
@@ -27,6 +29,143 @@ struct cf_envelope {
     char api_code[MN_CF_API_CODE_CAP];
     char api_msg[MN_CF_API_MSG_CAP];
 };
+
+struct cf_dual_slot {
+    char name[MN_FQDN_MAX];
+    int  fetched;
+    int  fallback_single;
+    struct mn_cf_dual_result dual;
+};
+
+struct cf_cycle_cache {
+    struct cf_dual_slot *slots;
+    size_t n_slots;
+};
+
+static void cf_cache_clear(struct mn_provider *p)
+{
+    struct cf_cycle_cache *cc;
+
+    if (p == NULL || p->priv == NULL) {
+        return;
+    }
+    cc = (struct cf_cycle_cache *)p->priv;
+    free(cc->slots);
+    free(cc);
+    p->priv = NULL;
+}
+
+static void cf_cycle_begin(struct mn_provider *p, const struct mn_cfg *cfg)
+{
+    size_t i, j, count = 0;
+    struct cf_cycle_cache *cc;
+
+    cf_cache_clear(p);
+    if (p == NULL || cfg == NULL || p->id == NULL) {
+        return;
+    }
+    /* Find names that have BOTH enabled A and AAAA records on this provider. */
+    for (i = 0; i < cfg->n_records && i < MN_MAX_RECORDS; ++i) {
+        const struct mn_record_cfg *r = &cfg->records[i];
+        int has_other = 0, seen_before = 0;
+
+        if (!r->enabled || r->family != AF_INET ||
+            strcasecmp(r->provider_id, p->id) != 0) {
+            continue;
+        }
+        for (j = 0; j < i; ++j) {
+            if (cfg->records[j].enabled &&
+                cfg->records[j].family == AF_INET &&
+                strcasecmp(cfg->records[j].provider_id, p->id) == 0 &&
+                strcasecmp(cfg->records[j].name, r->name) == 0) {
+                seen_before = 1;
+                break;
+            }
+        }
+        if (seen_before) {
+            continue;
+        }
+        for (j = 0; j < cfg->n_records && j < MN_MAX_RECORDS; ++j) {
+            const struct mn_record_cfg *o = &cfg->records[j];
+            if (o->enabled && o->family == AF_INET6 &&
+                strcasecmp(o->provider_id, p->id) == 0 &&
+                strcasecmp(o->name, r->name) == 0) {
+                has_other = 1;
+                break;
+            }
+        }
+        if (has_other) {
+            count++;
+        }
+    }
+    if (count == 0) {
+        return;
+    }
+    cc = (struct cf_cycle_cache *)calloc(1, sizeof(*cc));
+    if (cc == NULL) {
+        return;
+    }
+    cc->slots = (struct cf_dual_slot *)calloc(count, sizeof(*cc->slots));
+    if (cc->slots == NULL) {
+        free(cc);
+        return;
+    }
+    for (i = 0; i < cfg->n_records && i < MN_MAX_RECORDS && cc->n_slots < count; ++i) {
+        const struct mn_record_cfg *r = &cfg->records[i];
+        int has_other = 0, dup = 0;
+
+        if (!r->enabled || r->family != AF_INET ||
+            strcasecmp(r->provider_id, p->id) != 0) {
+            continue;
+        }
+        for (j = 0; j < cc->n_slots; ++j) {
+            if (strcasecmp(cc->slots[j].name, r->name) == 0) {
+                dup = 1;
+                break;
+            }
+        }
+        if (dup) {
+            continue;
+        }
+        for (j = 0; j < cfg->n_records && j < MN_MAX_RECORDS; ++j) {
+            const struct mn_record_cfg *o = &cfg->records[j];
+            if (o->enabled && o->family == AF_INET6 &&
+                strcasecmp(o->provider_id, p->id) == 0 &&
+                strcasecmp(o->name, r->name) == 0) {
+                has_other = 1;
+                break;
+            }
+        }
+        if (has_other) {
+            (void)mn_strlcpy(cc->slots[cc->n_slots].name,
+                             sizeof(cc->slots[cc->n_slots].name), r->name);
+            cc->n_slots++;
+        }
+    }
+    p->priv = cc;
+}
+
+static void cf_cycle_end(struct mn_provider *p)
+{
+    cf_cache_clear(p);
+}
+
+static struct cf_dual_slot *cf_find_dual_slot(struct mn_provider *p, const char *name)
+{
+    struct cf_cycle_cache *cc;
+    size_t i;
+
+    if (p == NULL || p->priv == NULL || name == NULL) {
+        return NULL;
+    }
+    cc = (struct cf_cycle_cache *)p->priv;
+    for (i = 0; i < cc->n_slots; ++i) {
+        if (strcasecmp(cc->slots[i].name, name) == 0) {
+            return &cc->slots[i];
+        }
+    }
+    return NULL;
+}
 
 static const char *cf_escape(char *buf, size_t cap, const char *value)
 {
@@ -227,6 +366,9 @@ static int cf_build_auth(const struct mn_provider *p, char *auth, size_t cap,
     return MN_OK;
 }
 
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
 static void cf_log_headers(const struct mn_http_req *req)
 {
     char method[MN_CF_ESC_CAP];
@@ -244,8 +386,6 @@ static int cf_http(const struct mn_provider *p, const struct mn_http_req *req,
                    struct mn_http_result *res, char *err, size_t errlen)
 {
     char suberr[MN_CF_DETAIL_CAP];
-    char detail[MN_CF_DETAIL_CAP];
-    char errname[MN_CF_ESC_CAP];
     int request_errcode = MN_OK;
     int status;
 
@@ -259,6 +399,7 @@ static int cf_http(const struct mn_provider *p, const struct mn_http_req *req,
     status = mn_http_request(p->cfg, p->ca, req, res, &request_errcode,
                              suberr, sizeof(suberr));
     if (status != MN_OK) {
+        char detail[MN_CF_DETAIL_CAP];
         if (status > 0) {
             status = E_PARSE;
         }
@@ -266,6 +407,7 @@ static int cf_http(const struct mn_provider *p, const struct mn_http_req *req,
         if (detail[0] != '\0') {
             cf_set_err(err, errlen, "%s", detail);
         } else {
+            char errname[MN_CF_ESC_CAP];
             cf_set_err(err, errlen, "reason=http_request err=%s",
                        cf_escape(errname, sizeof(errname), mn_err_name(status)));
         }
@@ -480,6 +622,27 @@ static int cf_init(struct mn_provider *p, const struct mn_cfg *cfg,
     return MN_OK;
 }
 
+static int cf_apply_dual_slot(const struct mn_record_cfg *rec,
+                              const struct mn_cf_dual_result *dual,
+                              struct mn_remote *out, char *err, size_t errlen)
+{
+    int n_found = (rec->family == AF_INET) ? dual->n_a : dual->n_aaaa;
+    const char *rid = (rec->family == AF_INET) ? dual->a_id : dual->aaaa_id;
+    const char *rcontent = (rec->family == AF_INET) ? dual->a_content : dual->aaaa_content;
+
+    if (n_found > 1) {
+        cf_log_duplicate(rec, n_found);
+    }
+    if (n_found > 0) {
+        out->found = 1;
+        if (mn_strlcpy(out->id, sizeof(out->id), rid) < 0) {
+            return cf_fail(err, errlen, E_PARSE, "id_truncated", NULL);
+        }
+        return cf_discover_content(rec, out, rcontent, err, errlen);
+    }
+    return MN_OK;
+}
+
 static int cf_discover(struct mn_provider *p, const struct mn_record_cfg *rec,
                        struct mn_remote *out, char *err, size_t errlen)
 {
@@ -487,6 +650,7 @@ static int cf_discover(struct mn_provider *p, const struct mn_record_cfg *rec,
     char path[MN_CF_PATH_CAP];
     struct mn_http_result res;
     struct cf_envelope env;
+    struct cf_dual_slot *slot;
     const char *type;
     int status;
     int result = E_PARSE;
@@ -508,15 +672,82 @@ static int cf_discover(struct mn_provider *p, const struct mn_record_cfg *rec,
     if (!cf_url_component_ok(p->zone_id) || !cf_url_component_ok(rec->name)) {
         return cf_fail(err, errlen, E_PARSE, "invalid_request_value", NULL);
     }
+
+    /* v1.3 REQ-08: consolidate A + AAAA discover for the same (provider, name)
+       within a single cycle via GET ?name={fqdn}&per_page=100. */
+    slot = cf_find_dual_slot(p, rec->name);
+    if (slot != NULL && slot->fetched && !slot->fallback_single) {
+        return cf_apply_dual_slot(rec, &slot->dual, out, err, errlen);
+    }
+    if (slot != NULL && !slot->fallback_single) {
+        char parse_err[256];
+        const char *body;
+        size_t len;
+
+        if (cf_fmt_checked(path, sizeof(path),
+                           "/client/v4/zones/%s/dns_records?name=%s&per_page=100",
+                           p->zone_id, rec->name) < 0) {
+            result = cf_fail(err, errlen, E_PARSE, "request_truncated", NULL);
+            goto done;
+        }
+        status = cf_build_auth(p, auth, sizeof(auth), err, errlen);
+        if (status < 0) {
+            result = status;
+            goto done;
+        }
+        status = cf_call(p, "GET", path, "", auth, &res, err, errlen);
+        if (status != MN_OK) {
+            result = status;
+            goto done;
+        }
+        status = cf_check_status(&res, err, errlen);
+        if (status != MN_OK) {
+            result = status;
+            goto done;
+        }
+        cf_body_view(&res, &body, &len);
+        parse_err[0] = '\0';
+        memset(&slot->dual, 0, sizeof(slot->dual));
+        if (mn_cf_parse_dual(body, len, &slot->dual, parse_err, sizeof(parse_err)) != MN_OK) {
+            char detail[256], errname[MN_CF_ESC_CAP];
+            cf_single_line(detail, sizeof(detail), parse_err);
+            cf_set_err(err, errlen, "%s", detail[0] != '\0' ? detail : "reason=json");
+            mn_log(MN_LOG_ERROR, "http parse err=%s reason=json",
+                   cf_escape(errname, sizeof(errname), mn_err_name(E_PARSE)));
+            result = E_PARSE;
+            goto done;
+        }
+        if (!slot->dual.success) {
+            memset(&env, 0, sizeof(env));
+            (void)mn_strlcpy(env.api_code, sizeof(env.api_code), slot->dual.api_code);
+            (void)mn_strlcpy(env.api_msg, sizeof(env.api_msg), slot->dual.api_msg);
+            result = cf_api_failure(&env, err, errlen);
+            goto done;
+        }
+        if (slot->dual.total_pages <= 1) {
+            slot->fetched = 1;
+            result = cf_apply_dual_slot(rec, &slot->dual, out, err, errlen);
+            goto done;
+        }
+        /* Paginated zone name (many TXT/MX records): fall back to typed query. */
+        slot->fallback_single = 1;
+        mn_http_result_free(&res);
+        memset(&res, 0, sizeof(res));
+        res.retry_after_secs = -1;
+    }
+
     if (cf_fmt_checked(path, sizeof(path),
                        "/client/v4/zones/%s/dns_records?type=%s&name=%s",
                        p->zone_id, type, rec->name) < 0) {
-        return cf_fail(err, errlen, E_PARSE, "request_truncated", NULL);
-    }
-    status = cf_build_auth(p, auth, sizeof(auth), err, errlen);
-    if (status < 0) {
-        result = status;
+        result = cf_fail(err, errlen, E_PARSE, "request_truncated", NULL);
         goto done;
+    }
+    if (auth[0] == '\0') {
+        status = cf_build_auth(p, auth, sizeof(auth), err, errlen);
+        if (status < 0) {
+            result = status;
+            goto done;
+        }
     }
     status = cf_call(p, "GET", path, "", auth, &res, err, errlen);
     if (status != MN_OK) {
@@ -703,8 +934,8 @@ done:
 
 static void cf_fini(struct mn_provider *p)
 {
-    /* p->ca is borrowed; p->priv is unused. provider.c wipes p->token. */
-    (void)p;
+    /* p->ca is borrowed; provider.c wipes p->token. */
+    cf_cache_clear(p);
 }
 
 const struct mn_provider_ops mn_cloudflare_ops = {
@@ -715,5 +946,7 @@ const struct mn_provider_ops mn_cloudflare_ops = {
     .discover = cf_discover,
     .update = cf_update,
     .create = cf_create,
-    .fini = cf_fini
+    .fini = cf_fini,
+    .cycle_begin = cf_cycle_begin,
+    .cycle_end = cf_cycle_end
 };

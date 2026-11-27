@@ -299,7 +299,7 @@ static void det_v4_be(const uint8_t bytes[16], uint32_t *be, uint32_t *host)
 
 static int det_v4_iface(const struct mn_cfg *cfg,
                         const struct mn_addr_set *addrs,
-                        struct mn_detect_result *res)
+                        struct mn_detect_result *res, int quiet)
 {
     uint32_t best_be = 0;
     uint32_t best_host = 0;
@@ -352,10 +352,11 @@ static int det_v4_iface(const struct mn_cfg *cfg,
         if (inet_ntop(AF_INET, &in, res->ip, sizeof(res->ip)) == NULL)
             return 0;
         res->source = 1;
-        det_log_v4_success(res, "iface");
+        if (!quiet)
+            det_log_v4_success(res, "iface");
         return 1;
     }
-    if (res->filtered_private > 0)
+    if (!quiet && res->filtered_private > 0)
         det_log_private_reason("iface", res);
     return 0;
 }
@@ -445,6 +446,59 @@ static int det_v4_external(const struct mn_cfg *cfg, struct mn_ca *ca,
     return 0;
 }
 
+static uint64_t det_mix64(uint64_t x)
+{
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+int mn_detect_ipv4_iface_only(const struct mn_cfg *cfg,
+                              const struct mn_addr_set *addrs,
+                              struct mn_detect_result *res,
+                              uint64_t *v4_if_sig)
+{
+    uint64_t sig_xor = 0, sig_sum = 0;
+    size_t i, n;
+    int found;
+
+    if (v4_if_sig != NULL)
+        *v4_if_sig = 0;
+    if (cfg == NULL || addrs == NULL || res == NULL)
+        return E_CFG;
+    det_reset(res, NULL, 0);
+
+    n = addrs->n;
+    if (n > MN_MAX_ADDRS)
+        n = MN_MAX_ADDRS;
+    for (i = 0; i < n; i++) {
+        const struct mn_addr *a = &addrs->a[i];
+        uint32_t be, host;
+        uint64_t item;
+
+        if (a->family != AF_INET || a->scope != RT_SCOPE_UNIVERSE || !a->if_up)
+            continue;
+        if (!mn_iface_allowed(a->ifname, cfg->detect.iface_include,
+                              cfg->detect.iface_exclude))
+            continue;
+        det_v4_be(a->bytes, &be, &host);
+        item = det_mix64(((uint64_t)a->ifindex << 32) | (uint64_t)host);
+        sig_xor ^= item;
+        sig_sum += item;
+    }
+    if (v4_if_sig != NULL)
+        *v4_if_sig = sig_xor ^ (sig_sum * 0x9e3779b97f4a7c15ULL);
+
+    if (cfg->detect.ipv4_mode == MN_IP4_OFF ||
+        cfg->detect.ipv4_mode == MN_IP4_EXTERNAL)
+        return E_NO_IP;
+    found = det_v4_iface(cfg, addrs, res, 1);
+    return found ? MN_OK : E_NO_IP;
+}
+
 int mn_detect_ipv4(const struct mn_cfg *cfg,
                    const struct mn_addr_set *addrs, struct mn_ca *ca,
                    struct mn_detect_result *res, char *err, size_t errlen)
@@ -463,7 +517,7 @@ int mn_detect_ipv4(const struct mn_cfg *cfg,
     case MN_IP4_OFF:
         return E_NO_IP;
     case MN_IP4_IFACE:
-        if (det_v4_iface(cfg, addrs, res))
+        if (det_v4_iface(cfg, addrs, res, 0))
             return MN_OK;
         return E_NO_IP;
     case MN_IP4_EXTERNAL:
@@ -478,7 +532,7 @@ int mn_detect_ipv4(const struct mn_cfg *cfg,
     case MN_IP4_AUTO: {
         int private_iface;
 
-        if (det_v4_iface(cfg, addrs, res))
+        if (det_v4_iface(cfg, addrs, res, 0))
             return MN_OK;
         private_iface = res->filtered_private > 0;
         if (det_v4_external(cfg, ca, res, &transport_rc, transport_err,
@@ -504,9 +558,10 @@ int mn_detect_ipv4(const struct mn_cfg *cfg,
     }
 }
 
-int mn_detect_ipv6(const struct mn_cfg *cfg,
-                   const struct mn_addr_set *addrs,
-                   struct mn_detect_result *res, char *err, size_t errlen)
+static int det_v6_impl(const struct mn_cfg *cfg,
+                       const struct mn_addr_set *addrs,
+                       struct mn_detect_result *res, int quiet,
+                       char *err, size_t errlen)
 {
     uint8_t best[16];
     int have_best = 0;
@@ -587,7 +642,23 @@ int mn_detect_ipv6(const struct mn_cfg *cfg,
         return E_CFG;
     }
     res->source = 1;
-    mn_log(MN_LOG_DEBUG, "detect family=inet6 source=iface ip=%s candidates=%d",
-           res->ip, res->candidates);
+    if (!quiet) {
+        mn_log(MN_LOG_DEBUG, "detect family=inet6 source=iface ip=%s candidates=%d",
+               res->ip, res->candidates);
+    }
     return MN_OK;
+}
+
+int mn_detect_ipv6_quiet(const struct mn_cfg *cfg,
+                         const struct mn_addr_set *addrs,
+                         struct mn_detect_result *res)
+{
+    return det_v6_impl(cfg, addrs, res, 1, NULL, 0);
+}
+
+int mn_detect_ipv6(const struct mn_cfg *cfg,
+                   const struct mn_addr_set *addrs,
+                   struct mn_detect_result *res, char *err, size_t errlen)
+{
+    return det_v6_impl(cfg, addrs, res, 0, err, errlen);
 }

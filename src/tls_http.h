@@ -31,6 +31,10 @@ void mn_http_result_free(struct mn_http_result *r);
    -1 means "not present". */
 void mn_http_last_meta(int *http_status, int *retry_after_secs);
 
+/* Per-cycle TLS handshake attempt counter (single-threaded diagnostics). */
+void     mn_tls_counter_reset(void);
+unsigned mn_tls_counter_get(void);
+
 /* Full request with socket + TLS. Returns 0 on HTTP-level completion (check status),
    negative error code otherwise; *errcode carries the same code. */
 int mn_http_request(const struct mn_cfg *cfg, struct mn_ca *ca,
@@ -49,5 +53,12 @@ const char *mn_tls_version_name(int version);
    chunked, limits, Retry-After. Returns 0 or E_PARSE with reason in err. */
 int mn_http_parse_raw(const char *buf, size_t len, struct mn_http_result *out,
                       int *errcode, char *err, size_t errlen);
+
+/* In-place response parser (v1.3 REQ-05): reuses/shrinks heap *bufp into
+   out->body without allocating a second full body copy. On success *bufp is
+   set to NULL (ownership moved to out->body); on error *bufp is freed and
+   set to NULL. */
+int mn_http_parse_in_place(char **bufp, size_t len, struct mn_http_result *out,
+                           int *errcode, char *err, size_t errlen);
 
 #endif /* MN_TLS_HTTP_H */

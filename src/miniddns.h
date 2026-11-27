@@ -177,6 +177,9 @@ struct mn_provider_ops {
                    const char *ip, struct mn_remote *out,
                    char *err, size_t errlen);
     void (*fini)(struct mn_provider *p);
+    /* Optional per-cycle hooks for single-cycle discover consolidation (cleared at cycle_end). */
+    void (*cycle_begin)(struct mn_provider *p, const struct mn_cfg *cfg);
+    void (*cycle_end)(struct mn_provider *p);
 };
 
 struct mn_provider {

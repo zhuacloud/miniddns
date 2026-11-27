@@ -45,7 +45,7 @@ def generate_certs(d):
 
 class MockServer:
     def __init__(self, certdir, statefile, logfile, cert="server.pem", key="server.key",
-                 stall=False):
+                 stall=False, bind_port=0):
         self.statefile = statefile
         self.logfile = logfile
         self.stall = stall
@@ -57,7 +57,7 @@ class MockServer:
         self.ctx = ctx
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("127.0.0.1", 0))
+        self.sock.bind(("127.0.0.1", bind_port))
         self.sock.listen(32)
         self.port = self.sock.getsockname()[1]
         self.sock.settimeout(0.5)
@@ -192,6 +192,8 @@ class MockServer:
             else:
                 payload_obj = {"success": True, "result": st.get("discover",
                                [{"id": "rec123", "content": "1.1.1.1"}]), "errors": []}
+                if "result_info" in st:
+                    payload_obj["result_info"] = st["result_info"]
             payload = json.dumps(payload_obj, separators=(",", ":"))
         if isinstance(payload_obj, dict):
             payload = json.dumps(payload_obj, separators=(",", ":"))

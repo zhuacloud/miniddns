@@ -23,13 +23,25 @@ struct mn_addr_set {
     size_t n;
 };
 
+struct mn_nl_addr_fp {
+    uint8_t  family;
+    uint8_t  scope;
+    uint8_t  valid_nonzero;
+    uint8_t  bytes[16];
+    unsigned ifindex;
+    uint32_t crit_flags;
+};
+
 struct mn_nl {
     int fd;
     uint32_t seq;
     size_t rcvbuf_actual;
-    /* ifindex -> { ifname, IFF_UP } from RTM_GETLINK */
-    struct { unsigned idx; char name[MN_IFNAME_MAX]; int up; } links[MN_MAX_ADDRS];
+    /* ifindex -> { ifname, IFF_UP, IFF_RUNNING } from RTM_GETLINK */
+    struct { unsigned idx; char name[MN_IFNAME_MAX]; int up; int running; } links[MN_MAX_ADDRS];
     size_t n_links;
+    /* last rescan address fingerprints for RA lifetime-refresh deduplication */
+    struct mn_nl_addr_fp fps[MN_MAX_ADDRS];
+    size_t n_fps;
 };
 
 int  mn_nl_open(struct mn_nl *nl, char *err, size_t errlen);
@@ -41,9 +53,19 @@ int  mn_nl_fd(const struct mn_nl *nl);
 int  mn_nl_rescan(struct mn_nl *nl, struct mn_addr_set *out,
                   char *err, size_t errlen);
 
+/* Update the in-memory address fingerprint snapshot from a completed addr_set. */
+void mn_nl_snapshot_fps(struct mn_nl *nl, const struct mn_addr_set *addrs);
+
 /* Drain pending netlink messages (non-blocking). *overflow=1 on ENOBUFS.
    Returns 1 when at least one interesting event was seen. */
 int  mn_nl_drain(struct mn_nl *nl, int *overflow, char *err, size_t errlen);
+
+/* Filtered drain (v1.3 REQ-07): suppresses pure RA IFA_CACHEINFO refreshes,
+   excluded interfaces, non-global scope and tentative/temporary noise while
+   reporting IFF_UP/IFF_RUNNING flips via *carrier_changed. */
+int  mn_nl_drain_filtered(struct mn_nl *nl, const struct mn_detect_cfg *det_cfg,
+                          int *overflow, int *carrier_changed,
+                          char *err, size_t errlen);
 
 /* Exposed for unit tests (§14.1). */
 int  mn_nl_decode_addr(struct mn_nl *nl, const struct nlmsghdr *nh, struct mn_addr *a);

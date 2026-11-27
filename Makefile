@@ -3,7 +3,8 @@ CC       ?= cc
 CSTD     ?= -std=c99
 WARN     ?= -Wall -Wextra -Wno-unused-parameter
 HARDEN   ?= -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -fno-plt
-OPT      ?= -O2
+OPT      ?= -Os
+OPT_VENDOR ?= -O2
 # Three DIFFERENT version namespaces (see docs/RELEASE_PROCESS.md section 1):
 #   - design specification version: docs/design.md v1.2 + revisions 1.2.x
 #   - software release version: X.Y.Z / X.Y.Z-rcN, injected by the release workflow
@@ -51,7 +52,7 @@ SECTS     = -ffunction-sections -fdata-sections
 CFLAGS   += $(CSTD) $(WARN) $(HARDEN) $(OPT) $(DEFS) $(INC) $(SECTS)
 # BearSSL is upstream code; keep our own -Wall -Wextra clean while not failing on it.
 # Hardening still applies: TLS/X.509 is the highest-risk attack surface.
-CFLAGS_VENDOR += $(CSTD) $(OPT) $(DEFS) $(INC) $(SECTS) -w $(HARDEN)
+CFLAGS_VENDOR += $(CSTD) $(OPT_VENDOR) $(DEFS) $(INC) $(SECTS) -w $(HARDEN)
 LDFLAGS  += -pie -Wl,-z,relro,-z,now -Wl,--gc-sections
 
 APP_SRC  := $(wildcard src/*.c)
@@ -138,6 +139,7 @@ static:
 	  exit 1; \
 	fi
 	$(MAKE) CC="$(STATIC_CC)" OPT="$(OPT) -fno-pie" \
+	        OPT_VENDOR="$(OPT_VENDOR) -fno-pie" \
 	        HARDEN="-fstack-protector-strong -D_FORTIFY_SOURCE=2 -fno-pie -fno-plt" \
 	        DEFS="$(DEFS) -DMN_STATIC_BUILD=1" \
 	        LDFLAGS="-static -s -no-pie -Wl,--gc-sections" build/miniddns
@@ -242,7 +244,7 @@ dist: verify-units doc
 	@if [ "$(LIBC)" = "musl" ]; then \
 	  $(MAKE) static; \
 	 elif [ "$(LIBC)" = "glibc" ]; then \
-	  $(MAKE) all CC="$(BUILD_CC)"; \
+	  $(MAKE) all CC="$(BUILD_CC)" LDFLAGS="-pie -s -Wl,-z,relro,-z,now -Wl,--gc-sections"; \
 	 else \
 	  echo "FATAL: LIBC must be musl or glibc"; exit 1; \
 	 fi

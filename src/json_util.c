@@ -1093,3 +1093,123 @@ fail:
     mn_cf_set_err(err, errlen);
     return E_PARSE;
 }
+
+int mn_cf_parse_dual(const char *body, size_t len,
+                     struct mn_cf_dual_result *out,
+                     char *err, size_t errlen)
+{
+    struct mn_json j;
+    const jsmntok_t *t;
+    int success_value = 0;
+    int field;
+
+    if (out == NULL) {
+        mn_cf_set_err(err, errlen);
+        return E_PARSE;
+    }
+    memset(out, 0, sizeof(*out));
+    out->total_pages = 1;
+    if (err != NULL && errlen > 0) {
+        err[0] = '\0';
+    }
+    if (mn_json_parse(&j, body, len) != MN_OK) {
+        goto fail;
+    }
+    t = mn_json_tok(&j, 0);
+    if (t == NULL || t->type != JSMN_OBJECT || mn_json_skip(&j, 0, 0) != j.ntok) {
+        goto fail;
+    }
+    field = mn_json_field(&j, 0, "success");
+    if (field < 0 || mn_json_bool(&j, field, &success_value) != MN_OK) {
+        goto fail;
+    }
+    out->success = success_value;
+
+    field = mn_json_field(&j, 0, "result_info");
+    if (field >= 0) {
+        const jsmntok_t *ri = mn_json_tok(&j, field);
+        if (ri != NULL && ri->type == JSMN_OBJECT) {
+            int tp = mn_json_field(&j, field, "total_pages");
+            int tpv = 1;
+            if (tp >= 0 && mn_json_int(&j, tp, &tpv) == MN_OK && tpv >= 1) {
+                out->total_pages = tpv;
+            }
+        }
+    }
+
+    field = mn_json_field(&j, 0, "result");
+    if (field >= 0) {
+        const jsmntok_t *r = mn_json_tok(&j, field);
+        int i;
+
+        if (r == NULL) {
+            goto fail;
+        }
+        if (r->type == JSMN_ARRAY) {
+            for (i = 0; i < r->size; ++i) {
+                int elem = mn_json_array_at(&j, field, i);
+                const jsmntok_t *e = mn_json_tok(&j, elem);
+                char rtype[16];
+                int tf;
+
+                if (e == NULL || e->type != JSMN_OBJECT) {
+                    goto fail;
+                }
+                tf = mn_json_field(&j, elem, "type");
+                if (tf < 0) {
+                    continue;
+                }
+                rtype[0] = '\0';
+                if (mn_cf_copy_string(&j, tf, rtype, sizeof(rtype)) != MN_OK) {
+                    goto fail;
+                }
+                if (strcmp(rtype, "A") == 0) {
+                    if (out->n_a == 0 &&
+                        mn_cf_read_result(&j, elem, out->a_id, sizeof(out->a_id),
+                                          out->a_content, sizeof(out->a_content)) != MN_OK) {
+                        goto fail;
+                    }
+                    out->n_a++;
+                } else if (strcmp(rtype, "AAAA") == 0) {
+                    if (out->n_aaaa == 0 &&
+                        mn_cf_read_result(&j, elem, out->aaaa_id, sizeof(out->aaaa_id),
+                                          out->aaaa_content, sizeof(out->aaaa_content)) != MN_OK) {
+                        goto fail;
+                    }
+                    out->n_aaaa++;
+                }
+            }
+        } else if (!(r->type == JSMN_PRIMITIVE && mn_json_token_is(&j, field, "null"))) {
+            goto fail;
+        }
+    }
+
+    field = mn_json_field(&j, 0, "errors");
+    if (field >= 0) {
+        const jsmntok_t *e = mn_json_tok(&j, field);
+        if (e == NULL) {
+            goto fail;
+        }
+        if (e->type == JSMN_ARRAY) {
+            if (e->size > 0) {
+                int first = mn_json_array_at(&j, field, 0);
+                const jsmntok_t *o = mn_json_tok(&j, first);
+                if (o == NULL || o->type != JSMN_OBJECT ||
+                    mn_cf_read_error(&j, first, out->api_code, sizeof(out->api_code),
+                                     out->api_msg, sizeof(out->api_msg)) != MN_OK) {
+                    goto fail;
+                }
+            }
+        } else if (!(e->type == JSMN_PRIMITIVE && mn_json_token_is(&j, field, "null"))) {
+            goto fail;
+        }
+    }
+
+    mn_json_free(&j);
+    return MN_OK;
+
+fail:
+    mn_json_free(&j);
+    mn_cf_set_err(err, errlen);
+    return E_PARSE;
+}

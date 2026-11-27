@@ -25,14 +25,25 @@
 #define MN_TLS_DEFAULT_HTTP_MS        8000
 #define MN_TLS_DEFAULT_CONNECT_MS     5000
 #define MN_TLS_RESP_CAP               ((size_t)MN_LIMIT_HEADER + (size_t)MN_LIMIT_BODY + 8192u)
-#define MN_TLS_REQ_HEADER_CAP         8192u
-#define MN_TLS_EXTRA_CAP              4096u
-#define MN_TLS_PATH_CAP               1024u
+#define MN_TLS_REQ_HEADER_CAP         2048u
+#define MN_TLS_EXTRA_CAP              1024u
+#define MN_TLS_PATH_CAP               512u
 #define MN_TLS_REASON_CAP             64u
 #define MN_TLS_LOG_VALUE_CAP          (MN_LOG_FIELD_MAX + 1)
 
 static int g_last_http_status = -1;
 static int g_last_retry_after = -1;
+static unsigned g_tls_handshakes = 0;
+
+void mn_tls_counter_reset(void)
+{
+    g_tls_handshakes = 0;
+}
+
+unsigned mn_tls_counter_get(void)
+{
+    return g_tls_handshakes;
+}
 
 void mn_http_result_free(struct mn_http_result *r)
 {
@@ -899,45 +910,45 @@ static int tls_decode_chunked(const char *p, size_t len,
     }
 }
 
-int mn_http_parse_raw(const char *buf, size_t len,
-                      struct mn_http_result *out, int *errcode,
-                      char *err, size_t errlen)
-{
-    size_t pos, line_len, advance, header_bytes, body_start, available, n;
-    size_t name_len, vlen;
-    const char *line, *colon, *value;
-    uint64_t cl, cl_first;
-    int has_cl, cl_bad, chunked, te_seen;
-    int status;
-    const char *why = "unknown";
-    char tmp[256];
-    int trunc;
+struct tls_parsed_hdr {
+    size_t   body_start;
+    uint64_t cl;
+    int      has_cl;
+    int      chunked;
+};
 
-    if (errcode != NULL) {
-        *errcode = MN_OK;
-    }
-    tls_err_clear(err, errlen);
-    tls_result_init(out);
-    if (out == NULL) {
-        return tls_parse_fail(out, errcode, err, errlen, "bad_status_line");
-    }
+static int tls_parse_headers(const char *buf, size_t len,
+                             struct mn_http_result *out,
+                             struct tls_parsed_hdr *hdr,
+                             const char **why)
+{
+    size_t pos, line_len, advance, header_bytes, name_len, vlen;
+    const char *line, *colon, *value;
+    uint64_t cl = 0, cl_first = 0;
+    int has_cl = 0, cl_bad = 0, chunked = 0, te_seen = 0;
+    int status, trunc;
+    char tmp[256];
+
+    memset(hdr, 0, sizeof(*hdr));
     if (buf == NULL || len == 0) {
-        return tls_parse_fail(out, errcode, err, errlen, "bad_status_line");
+        *why = "bad_status_line";
+        return -1;
     }
     if (tls_line(buf, len, &line_len, &advance) < 0) {
         if (len >= (size_t)MN_LIMIT_HEADER) {
-            return tls_parse_fail(out, errcode, err, errlen,
-                                  "header_too_large");
+            *why = "header_too_large";
+            return -1;
         }
         if (len < 7 || memcmp(buf, "HTTP/1.", 7) != 0) {
-            return tls_parse_fail(out, errcode, err, errlen,
-                                  "bad_status_line");
+            *why = "bad_status_line";
+            return -1;
         }
-        return tls_parse_fail(out, errcode, err, errlen,
-                              "incomplete_headers");
+        *why = "incomplete_headers";
+        return -1;
     }
     if (line_len >= (size_t)MN_LIMIT_HEADER) {
-        return tls_parse_fail(out, errcode, err, errlen, "header_too_large");
+        *why = "header_too_large";
+        return -1;
     }
     line = buf;
     if (line_len < 12 || memcmp(line, "HTTP/1.", 7) != 0 ||
@@ -946,7 +957,8 @@ int mn_http_parse_raw(const char *buf, size_t len,
         !isdigit((unsigned char)line[10]) ||
         !isdigit((unsigned char)line[11]) ||
         (line_len > 12 && line[12] != ' ')) {
-        return tls_parse_fail(out, errcode, err, errlen, "bad_status_line");
+        *why = "bad_status_line";
+        return -1;
     }
     status = (line[9] - '0') * 100 + (line[10] - '0') * 10 +
              (line[11] - '0');
@@ -954,34 +966,28 @@ int mn_http_parse_raw(const char *buf, size_t len,
     pos = advance;
     header_bytes = advance;
 
-    has_cl = 0;
-    cl_bad = 0;
-    cl = 0;
-    cl_first = 0;
-    chunked = 0;
-    te_seen = 0;
     for (;;) {
         if (pos >= len) {
-            return tls_parse_fail(out, errcode, err, errlen,
-                                  "incomplete_headers");
+            *why = "incomplete_headers";
+            return -1;
         }
         if (tls_line(buf + pos, len - pos, &line_len, &advance) < 0) {
             if (header_bytes + (len - pos) > (size_t)MN_LIMIT_HEADER) {
-                return tls_parse_fail(out, errcode, err, errlen,
-                                      "header_too_large");
+                *why = "header_too_large";
+                return -1;
             }
-            return tls_parse_fail(out, errcode, err, errlen,
-                                  "incomplete_headers");
+            *why = "incomplete_headers";
+            return -1;
         }
         if (header_bytes + advance > (size_t)MN_LIMIT_HEADER) {
-            return tls_parse_fail(out, errcode, err, errlen,
-                                  "header_too_large");
+            *why = "header_too_large";
+            return -1;
         }
         header_bytes += advance;
         line = buf + pos;
         pos += advance;
         if (line_len == 0) {
-            body_start = pos;
+            hdr->body_start = pos;
             break;
         }
         colon = (const char *)memchr(line, ':', line_len);
@@ -1008,15 +1014,15 @@ int mn_http_parse_raw(const char *buf, size_t len,
             }
         } else if (tls_iascii_eq(line, name_len, "Transfer-Encoding")) {
             if (te_seen || !tls_iascii_eq(value, vlen, "chunked")) {
-                return tls_parse_fail(out, errcode, err, errlen,
-                                      "transfer_encoding");
+                *why = "transfer_encoding";
+                return -1;
             }
             te_seen = 1;
             chunked = 1;
         } else if (tls_iascii_eq(line, name_len, "Content-Encoding")) {
             if (!tls_iascii_eq(value, vlen, "identity")) {
-                return tls_parse_fail(out, errcode, err, errlen,
-                                      "encoded_body");
+                *why = "encoded_body";
+                return -1;
             }
         } else if (tls_iascii_eq(line, name_len, "Retry-After")) {
             if (tls_copy_slice(tmp, sizeof tmp, value, vlen, &trunc) < 0 ||
@@ -1033,20 +1039,121 @@ int mn_http_parse_raw(const char *buf, size_t len,
         }
     }
     if (cl_bad && !chunked) {
-        return tls_parse_fail(out, errcode, err, errlen,
-                              "bad_content_length");
+        *why = "bad_content_length";
+        return -1;
     }
-    available = len - body_start;
-    if (chunked) {
-        if (tls_decode_chunked(buf + body_start, available, out, &why) < 0) {
+    hdr->cl = cl;
+    hdr->has_cl = has_cl;
+    hdr->chunked = chunked;
+    return 0;
+}
+
+static int tls_decode_chunked_in_place(char *buf, size_t body_start,
+                                       size_t len, size_t *out_len,
+                                       const char **why)
+{
+    size_t pos = body_start, wpos = 0;
+    size_t line_len, advance, chunk, after, sep;
+
+    for (;;) {
+        if (pos >= len) {
+            *why = "incomplete_body";
+            return -1;
+        }
+        if (tls_line(buf + pos, len - pos, &line_len, &advance) < 0) {
+            *why = "incomplete_body";
+            return -1;
+        }
+        if (tls_parse_chunk_size(buf + pos, line_len, &chunk, why) < 0) {
+            return -1;
+        }
+        pos += advance;
+        if (chunk == 0) {
+            for (;;) {
+                if (pos >= len) {
+                    *why = "incomplete_body";
+                    return -1;
+                }
+                if (tls_line(buf + pos, len - pos,
+                             &line_len, &advance) < 0) {
+                    *why = "incomplete_body";
+                    return -1;
+                }
+                pos += advance;
+                if (line_len == 0) {
+                    buf[wpos] = '\0';
+                    *out_len = wpos;
+                    return 0;
+                }
+            }
+        }
+        if (chunk > (size_t)MN_LIMIT_BODY - wpos) {
+            *why = "body_too_large";
+            return -1;
+        }
+        if (len - pos < chunk) {
+            *why = "incomplete_body";
+            return -1;
+        }
+        after = pos + chunk;
+        if (after >= len) {
+            *why = "incomplete_body";
+            return -1;
+        }
+        if (buf[after] == '\r') {
+            if (after + 1 >= len) {
+                *why = "incomplete_body";
+                return -1;
+            }
+            if (buf[after + 1] != '\n') {
+                *why = "bad_chunk";
+                return -1;
+            }
+            sep = 2;
+        } else if (buf[after] == '\n') {
+            sep = 1;
+        } else {
+            *why = "bad_chunk";
+            return -1;
+        }
+        if (chunk > 0) {
+            memmove(buf + wpos, buf + pos, chunk);
+            wpos += chunk;
+        }
+        pos = after + sep;
+    }
+}
+
+int mn_http_parse_raw(const char *buf, size_t len,
+                      struct mn_http_result *out, int *errcode,
+                      char *err, size_t errlen)
+{
+    struct tls_parsed_hdr hdr;
+    size_t available, n;
+    const char *why = "unknown";
+
+    if (errcode != NULL) {
+        *errcode = MN_OK;
+    }
+    tls_err_clear(err, errlen);
+    tls_result_init(out);
+    if (out == NULL) {
+        return tls_parse_fail(out, errcode, err, errlen, "bad_status_line");
+    }
+    if (tls_parse_headers(buf, len, out, &hdr, &why) < 0) {
+        return tls_parse_fail(out, errcode, err, errlen, why);
+    }
+    available = len - hdr.body_start;
+    if (hdr.chunked) {
+        if (tls_decode_chunked(buf + hdr.body_start, available, out, &why) < 0) {
             return tls_parse_fail(out, errcode, err, errlen, why);
         }
-    } else if (has_cl) {
-        if (cl > (size_t)MN_LIMIT_BODY) {
+    } else if (hdr.has_cl) {
+        if (hdr.cl > (size_t)MN_LIMIT_BODY) {
             return tls_parse_fail(out, errcode, err, errlen,
                                   "body_too_large");
         }
-        n = (size_t)cl;
+        n = (size_t)hdr.cl;
         if (available < n) {
             return tls_parse_fail(out, errcode, err, errlen,
                                   "incomplete_body");
@@ -1057,7 +1164,7 @@ int mn_http_parse_raw(const char *buf, size_t len,
                                   "out_of_memory");
         }
         if (n > 0) {
-            memcpy(out->body, buf + body_start, n);
+            memcpy(out->body, buf + hdr.body_start, n);
         }
         out->body[n] = '\0';
         out->body_len = n;
@@ -1072,11 +1179,81 @@ int mn_http_parse_raw(const char *buf, size_t len,
                                   "out_of_memory");
         }
         if (available > 0) {
-            memcpy(out->body, buf + body_start, available);
+            memcpy(out->body, buf + hdr.body_start, available);
         }
         out->body[available] = '\0';
         out->body_len = available;
     }
+    if (errcode != NULL) {
+        *errcode = MN_OK;
+    }
+    tls_err_clear(err, errlen);
+    return MN_OK;
+}
+
+int mn_http_parse_in_place(char **bufp, size_t len,
+                           struct mn_http_result *out, int *errcode,
+                           char *err, size_t errlen)
+{
+    struct tls_parsed_hdr hdr;
+    char *buf, *shrunk;
+    size_t available, n = 0;
+    const char *why = "unknown";
+
+    if (errcode != NULL) {
+        *errcode = MN_OK;
+    }
+    tls_err_clear(err, errlen);
+    tls_result_init(out);
+    buf = bufp != NULL ? *bufp : NULL;
+    if (bufp != NULL) {
+        *bufp = NULL;
+    }
+    if (out == NULL || buf == NULL) {
+        free(buf);
+        return tls_parse_fail(out, errcode, err, errlen, "bad_status_line");
+    }
+    if (tls_parse_headers(buf, len, out, &hdr, &why) < 0) {
+        free(buf);
+        return tls_parse_fail(out, errcode, err, errlen, why);
+    }
+    available = len - hdr.body_start;
+    if (hdr.chunked) {
+        if (tls_decode_chunked_in_place(buf, hdr.body_start, len, &n, &why) < 0) {
+            free(buf);
+            return tls_parse_fail(out, errcode, err, errlen, why);
+        }
+    } else if (hdr.has_cl) {
+        if (hdr.cl > (size_t)MN_LIMIT_BODY) {
+            free(buf);
+            return tls_parse_fail(out, errcode, err, errlen,
+                                  "body_too_large");
+        }
+        n = (size_t)hdr.cl;
+        if (available < n) {
+            free(buf);
+            return tls_parse_fail(out, errcode, err, errlen,
+                                  "incomplete_body");
+        }
+        if (n > 0) {
+            memmove(buf, buf + hdr.body_start, n);
+        }
+        buf[n] = '\0';
+    } else {
+        if (available > (size_t)MN_LIMIT_BODY) {
+            free(buf);
+            return tls_parse_fail(out, errcode, err, errlen,
+                                  "body_too_large");
+        }
+        n = available;
+        if (n > 0) {
+            memmove(buf, buf + hdr.body_start, n);
+        }
+        buf[n] = '\0';
+    }
+    shrunk = (char *)realloc(buf, n + 1);
+    out->body = shrunk != NULL ? shrunk : buf;
+    out->body_len = n;
     if (errcode != NULL) {
         *errcode = MN_OK;
     }
@@ -1584,9 +1761,9 @@ static int tls_setup(struct mn_tls *t,
     br_x509_minimal_set_hash(&t->xc, br_sha256_ID, &br_sha256_vtable);
     br_x509_minimal_set_hash(&t->xc, br_sha384_ID, &br_sha384_vtable);
     br_x509_minimal_set_hash(&t->xc, br_sha512_ID, &br_sha512_vtable);
-    br_x509_minimal_set_rsa(&t->xc, br_rsa_i31_pkcs1_vrfy);
+    br_x509_minimal_set_rsa(&t->xc, br_rsa_pkcs1_vrfy_get_default());
     br_x509_minimal_set_ecdsa(&t->xc, br_ec_get_default(),
-                              br_ecdsa_i31_vrfy_asn1);
+                              br_ecdsa_vrfy_asn1_get_default());
     wall = (int64_t)mn_wall();
     if (wall < 0) {
         wall = 0;
@@ -1913,28 +2090,23 @@ static int tls_response_complete(const char *buf, size_t len)
     return -1;
 }
 
-static int tls_one_request(const struct tls_req_args *args,
-                           char **raw_out, size_t *raw_len,
-                           struct mn_http_result *out,
-                           char *reason, size_t reasoncap,
-                           char *err, size_t errlen, int *errcode)
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
+static int tls_build_wire(const struct tls_req_args *args,
+                          char **wire_out, size_t *req_len_out,
+                          char *reason, size_t reasoncap,
+                          char *err, size_t errlen, int *errcode)
 {
     char headers[MN_TLS_REQ_HEADER_CAP];
     char extra_norm[MN_TLS_EXTRA_CAP];
-    char creason[MN_TLS_REASON_CAP];
-    char *wire, *resp;
-    const char *body, *why;
-    size_t body_len, extra_len, hlen, req_len, rlen, rcap;
-    int r, fd, rc, parse_rc, nr;
-    int64_t connect_deadline = 0;
-    struct mn_tls t;
-    unsigned char tmp[4096];
+    const char *body;
+    size_t body_len, extra_len, hlen, req_len;
+    char *wire;
+    int r;
 
-    *raw_out = NULL;
-    *raw_len = 0;
-    tls_result_init(out);
-    tls_copy_literal(reason, reasoncap, "");
-    tls_err_clear(err, errlen);
+    *wire_out = NULL;
+    *req_len_out = 0;
     body = args->body != NULL ? args->body : "";
     body_len = strlen(body);
     if (tls_validate_method(args->method) < 0 ||
@@ -1946,6 +2118,7 @@ static int tls_one_request(const struct tls_req_args *args,
     }
     if (tls_normalize_extra(args->extra, extra_norm, sizeof extra_norm,
                             &extra_len) < 0) {
+        mn_secure_zero(extra_norm, sizeof extra_norm);
         return tls_one_fail(E_PARSE, "bad_request_headers", reason, reasoncap,
                             err, errlen, errcode);
     }
@@ -1961,85 +2134,140 @@ static int tls_one_request(const struct tls_req_args *args,
                  "\r\n",
                  args->method, args->path, args->host, MN_VERSION,
                  body_len, extra_norm);
+    mn_secure_zero(extra_norm, sizeof extra_norm);
     if (!tls_snprintf_ok(r, sizeof headers)) {
+        mn_secure_zero(headers, sizeof headers);
         return tls_one_fail(E_PARSE, "request_too_large", reason, reasoncap,
                             err, errlen, errcode);
     }
     hlen = (size_t)r;
     if (body_len > SIZE_MAX - hlen - 1) {
+        mn_secure_zero(headers, sizeof headers);
         return tls_one_fail(E_PARSE, "request_too_large", reason, reasoncap,
                             err, errlen, errcode);
     }
     req_len = hlen + body_len;
     wire = (char *)malloc(req_len + 1);
     if (wire == NULL) {
+        mn_secure_zero(headers, sizeof headers);
         return tls_one_fail(E_PARSE, "request_too_large", reason, reasoncap,
                             err, errlen, errcode);
     }
     memcpy(wire, headers, hlen);
+    mn_secure_zero(headers, sizeof headers);
     if (body_len > 0) {
         memcpy(wire + hlen, body, body_len);
     }
     wire[req_len] = '\0';
     tls_debug_dump_headers("request", args->host, wire, req_len);
+    *wire_out = wire;
+    *req_len_out = req_len;
+    return MN_OK;
+}
+
+static int tls_one_request(const struct tls_req_args *args,
+                           char *loc_out, size_t loc_cap, int *loc_rc,
+                           struct mn_http_result *out,
+                           char *reason, size_t reasoncap,
+                           char *err, size_t errlen, int *errcode)
+{
+    char creason[MN_TLS_REASON_CAP];
+    char *wire = NULL, *resp = NULL;
+    const char *why;
+    size_t req_len = 0, rlen, rcap;
+    int r, fd = -1, rc, parse_rc, nr;
+    int64_t connect_deadline = 0;
+    struct mn_tls *t = NULL;
+    unsigned char tmp[512];
+
+    if (loc_out != NULL && loc_cap > 0) {
+        loc_out[0] = '\0';
+    }
+    if (loc_rc != NULL) {
+        *loc_rc = 0;
+    }
+    tls_result_init(out);
+    tls_copy_literal(reason, reasoncap, "");
+    tls_err_clear(err, errlen);
+    rc = tls_build_wire(args, &wire, &req_len, reason, reasoncap,
+                        err, errlen, errcode);
+    if (rc != MN_OK) {
+        return rc;
+    }
 
     creason[0] = '\0';
-    fd = -1;
     rc = tls_connect(args->cfg, args->host, args->port, args->deadline,
                      &fd, &connect_deadline, err, errlen,
                      creason, sizeof creason);
     if (rc != 0) {
         tls_copy_literal(reason, reasoncap, creason);
+        mn_secure_zero(wire, req_len);
         free(wire);
         if (errcode != NULL) {
             *errcode = rc;
         }
         return rc;
     }
-    memset(&t, 0, sizeof t);
-    t.fd = fd;
+    /* v1.3 REQ-04: heap-allocate struct mn_tls (23.3 KiB), wipe + free on all exits. */
+    t = (struct mn_tls *)calloc(1, sizeof(*t));
+    if (t == NULL) {
+        close(fd);
+        mn_secure_zero(wire, req_len);
+        free(wire);
+        return tls_one_fail(E_TLS_HANDSHAKE, "out_of_memory", reason, reasoncap,
+                            err, errlen, errcode);
+    }
+    t->fd = fd;
+    g_tls_handshakes++;
     /* connect_timeout_ms covers TCP + the TLS handshake (§04.2). */
-    t.deadline = connect_deadline != 0 ? connect_deadline : args->deadline;
-    if (tls_setup(&t, args->anchors, args->n_anchors, args->host) != 0) {
-        rc = tls_failure_rc(&t);
+    t->deadline = connect_deadline != 0 ? connect_deadline : args->deadline;
+    if (tls_setup(t, args->anchors, args->n_anchors, args->host) != 0) {
+        rc = tls_failure_rc(t);
         why = tls_reason_for_rc(rc);
         tls_copy_literal(reason, reasoncap, why);
         tls_set_err(err, errlen, "reason=%s br_err=%d", why,
-                    br_ssl_engine_last_error(&t.sc.eng));
+                    br_ssl_engine_last_error(&t->sc.eng));
+        mn_secure_zero(t, sizeof(*t));
+        free(t);
         close(fd);
+        mn_secure_zero(wire, req_len);
         free(wire);
         if (errcode != NULL) {
             *errcode = rc;
         }
         return rc;
     }
-    br_sslio_init(&t.ioc, &t.sc.eng, tls_low_read, &t, tls_low_write, &t);
-    if (br_sslio_write_all(&t.ioc, wire, req_len) != 0 ||
-        br_sslio_flush(&t.ioc) != 0) {
-        rc = tls_failure_rc(&t);
+    br_sslio_init(&t->ioc, &t->sc.eng, tls_low_read, t, tls_low_write, t);
+    if (br_sslio_write_all(&t->ioc, wire, req_len) != 0 ||
+        br_sslio_flush(&t->ioc) != 0) {
+        rc = tls_failure_rc(t);
         why = tls_reason_for_rc(rc);
         tls_copy_literal(reason, reasoncap, why);
         tls_set_err(err, errlen, "reason=%s br_err=%d", why,
-                    br_ssl_engine_last_error(&t.sc.eng));
+                    br_ssl_engine_last_error(&t->sc.eng));
+        mn_secure_zero(t, sizeof(*t));
+        free(t);
         close(fd);
+        mn_secure_zero(wire, req_len);
         free(wire);
         if (errcode != NULL) {
             *errcode = rc;
         }
         return rc;
     }
+    mn_secure_zero(wire, req_len);
     free(wire);
+    wire = NULL;
     /* The handshake is complete; the remaining budget is http_timeout_ms. */
-    t.deadline = args->deadline;
+    t->deadline = args->deadline;
 
-    resp = NULL;
     rlen = 0;
     rcap = 0;
     why = "timeout";
     for (;;) {
         int complete;
 
-        if (t.timeout || mn_now_ms() >= args->deadline) {
+        if (t->timeout || mn_now_ms() >= args->deadline) {
             /* A full response may already be buffered even if the server
                keeps the connection open; do not discard it. */
             complete = rlen > 0 ? tls_response_complete(resp, rlen) : 0;
@@ -2048,7 +2276,7 @@ static int tls_one_request(const struct tls_req_args *args,
             why = "timeout";
             goto read_fail;
         }
-        nr = br_sslio_read(&t.ioc, tmp, sizeof tmp);
+        nr = br_sslio_read(&t->ioc, tmp, sizeof tmp);
         if (nr > 0) {
             if (tls_resp_append(&resp, &rlen, &rcap, tmp,
                                 (size_t)nr) < 0) {
@@ -2061,17 +2289,17 @@ static int tls_one_request(const struct tls_req_args *args,
             if (complete == -2) break;   /* let the full parser report */
             continue;
         }
-        if (t.timeout) {
+        if (t->timeout) {
             complete = rlen > 0 ? tls_response_complete(resp, rlen) : 0;
             if (complete != 0) break;
             rc = E_TIMEOUT;
             why = "timeout";
             goto read_fail;
         }
-        if (t.eof) {
+        if (t->eof) {
             /* A close-delimited body is only complete when the peer sent
                TLS close_notify; a bare TCP FIN is a truncation attack. */
-            r = br_ssl_engine_last_error(&t.sc.eng);
+            r = br_ssl_engine_last_error(&t->sc.eng);
             if (r != 0) {
                 rc = tls_map_br_error(r);
                 why = "tls_truncated";
@@ -2079,27 +2307,34 @@ static int tls_one_request(const struct tls_req_args *args,
             }
             break;
         }
-        r = br_ssl_engine_last_error(&t.sc.eng);
+        r = br_ssl_engine_last_error(&t->sc.eng);
         if (r != 0) {
             rc = tls_map_br_error(r);
             why = tls_reason_for_rc(rc);
             goto read_fail;
         }
-        if (t.io_error) {
+        if (t->io_error) {
             rc = E_TLS_HANDSHAKE;
             why = "tls_handshake";
             goto read_fail;
         }
         break;
     }
+    mn_secure_zero(t, sizeof(*t));
+    free(t);
+    t = NULL;
     close(fd);
+    fd = -1;
     if (rlen == 0) {
         free(resp);
         return tls_one_fail(E_TIMEOUT, "incomplete_response", reason,
                             reasoncap, err, errlen, errcode);
     }
     tls_debug_dump_headers("response", args->host, resp, rlen);
-    parse_rc = mn_http_parse_raw(resp, rlen, out, errcode, err, errlen);
+    if (loc_out != NULL && loc_cap > 0 && loc_rc != NULL) {
+        *loc_rc = tls_find_header(resp, rlen, "Location", loc_out, loc_cap);
+    }
+    parse_rc = mn_http_parse_in_place(&resp, rlen, out, errcode, err, errlen);
     if (parse_rc != 0) {
         tls_extract_reason(err, creason, sizeof creason);
         if (strcmp(creason, "incomplete_headers") == 0 ||
@@ -2112,7 +2347,6 @@ static int tls_one_request(const struct tls_req_args *args,
         if (out->status > 0) {
             tls_set_meta(out->status, -1);
         }
-        free(resp);
         mn_http_result_free(out);
         if (errcode != NULL) {
             *errcode = rc;
@@ -2123,13 +2357,10 @@ static int tls_one_request(const struct tls_req_args *args,
     if (args->want_json &&
         !tls_contains_nocase(out->content_type, strlen(out->content_type),
                              "json")) {
-        free(resp);
         mn_http_result_free(out);
         return tls_one_fail(E_PARSE, "content_type", reason, reasoncap,
                             err, errlen, errcode);
     }
-    *raw_out = resp;
-    *raw_len = rlen;
     if (errcode != NULL) {
         *errcode = MN_OK;
     }
@@ -2137,7 +2368,13 @@ static int tls_one_request(const struct tls_req_args *args,
     return MN_OK;
 
 read_fail:
-    close(fd);
+    if (t != NULL) {
+        mn_secure_zero(t, sizeof(*t));
+        free(t);
+    }
+    if (fd >= 0) {
+        close(fd);
+    }
     free(resp);
     tls_copy_literal(reason, reasoncap, why);
     tls_set_err(err, errlen, "reason=%s", why);
@@ -2163,16 +2400,14 @@ int mn_http_request(const struct mn_cfg *cfg, struct mn_ca *ca,
                     int *errcode, char *err, size_t errlen)
 {
     char cur_host[MN_FQDN_MAX], cur_path[MN_TLS_PATH_CAP];
-    char new_host[MN_FQDN_MAX], new_path[MN_TLS_PATH_CAP];
-    char location[MN_TLS_PATH_CAP + MN_FQDN_MAX + 16];
     char one_reason[MN_TLS_REASON_CAP], reason[MN_TLS_REASON_CAP];
     struct tls_req_args args;
     struct mn_http_result res;
     const br_x509_trust_anchor *anchors;
-    char *raw;
-    size_t n_anchors, raw_len;
+    char *location = NULL;
+    size_t n_anchors, loc_cap = 0;
     int64_t deadline;
-    int rc, r, status, redirects, cur_port;
+    int rc, r, loc_rc, status, redirects, cur_port;
 
     if (errcode != NULL) {
         *errcode = MN_OK;
@@ -2222,6 +2457,15 @@ int mn_http_request(const struct mn_cfg *cfg, struct mn_ca *ca,
     redirects = 0;
     status = -1;
     rc = MN_OK;
+    if (req->allow_redirect) {
+        loc_cap = MN_TLS_PATH_CAP + MN_FQDN_MAX + 16;
+        location = (char *)malloc(loc_cap);
+        if (location == NULL) {
+            tls_copy_literal(reason, sizeof reason, "out_of_memory");
+            return tls_error_return(E_PARSE, -1, req->host, reason,
+                                    err, errlen, errcode);
+        }
+    }
     for (;;) {
         args.cfg = cfg;
         args.anchors = anchors;
@@ -2235,12 +2479,17 @@ int mn_http_request(const struct mn_cfg *cfg, struct mn_ca *ca,
         args.port = cur_port;
         args.want_json = req->want_json;
 
-        raw = NULL;
-        raw_len = 0;
         tls_result_init(&res);
         one_reason[0] = '\0';
-        rc = tls_one_request(&args, &raw, &raw_len, &res, one_reason,
-                             sizeof one_reason, err, errlen, errcode);
+        if (location != NULL) {
+            location[0] = '\0';
+        }
+        loc_rc = 0;
+        rc = tls_one_request(&args,
+                             location, loc_cap,
+                             req->allow_redirect ? &loc_rc : NULL,
+                             &res, one_reason, sizeof one_reason,
+                             err, errlen, errcode);
         if (rc != 0) {
             status = res.status > 0 ? res.status : -1;
             tls_copy_literal(reason, sizeof reason,
@@ -2249,32 +2498,29 @@ int mn_http_request(const struct mn_cfg *cfg, struct mn_ca *ca,
             if (res.status > 0) {
                 tls_move_result(out, &res);
             }
-            free(raw);
             mn_http_result_free(&res);
             goto done;
         }
         status = res.status;
         if (status >= 300 && status < 400 && req->allow_redirect) {
+            char new_host[MN_FQDN_MAX], new_path[MN_TLS_PATH_CAP];
+
             if (redirects >= MN_MAX_REDIRECT) {
                 tls_copy_literal(reason, sizeof reason, "redirect_limit");
                 tls_set_err(err, errlen, "reason=redirect_limit http_status=%d",
                             status);
                 rc = E_HTTP_STATUS;
                 tls_move_result(out, &res);
-                free(raw);
                 mn_http_result_free(&res);
                 goto done;
             }
-            r = tls_find_header(raw, raw_len, "Location",
-                                location, sizeof location);
-            if (r <= 0 || tls_redirect_allowed(cfg, location,
-                                               new_host, sizeof new_host,
-                                               new_path, sizeof new_path) < 0) {
+            if (loc_rc <= 0 || tls_redirect_allowed(cfg, location,
+                                                    new_host, sizeof new_host,
+                                                    new_path, sizeof new_path) < 0) {
                 tls_copy_literal(reason, sizeof reason, "redirect_rejected");
                 tls_set_err(err, errlen, "reason=redirect_rejected");
                 rc = E_PARSE;
                 tls_move_result(out, &res);
-                free(raw);
                 mn_http_result_free(&res);
                 goto done;
             }
@@ -2284,7 +2530,6 @@ int mn_http_request(const struct mn_cfg *cfg, struct mn_ca *ca,
                 tls_set_err(err, errlen, "reason=redirect_rejected");
                 rc = E_PARSE;
                 tls_move_result(out, &res);
-                free(raw);
                 mn_http_result_free(&res);
                 goto done;
             }
@@ -2294,13 +2539,11 @@ int mn_http_request(const struct mn_cfg *cfg, struct mn_ca *ca,
                 tls_set_err(err, errlen, "reason=redirect_rejected");
                 rc = E_PARSE;
                 tls_move_result(out, &res);
-                free(raw);
                 mn_http_result_free(&res);
                 goto done;
             }
             cur_port = 443;
             redirects++;
-            free(raw);
             mn_http_result_free(&res);
             continue;
         }
@@ -2320,12 +2563,12 @@ int mn_http_request(const struct mn_cfg *cfg, struct mn_ca *ca,
             rc = MN_OK;
         }
         tls_move_result(out, &res);
-        free(raw);
         mn_http_result_free(&res);
         goto done;
     }
 
 done:
+    free(location);
     if (rc == MN_OK) {
         if (errcode != NULL) {
             *errcode = MN_OK;
@@ -2354,7 +2597,7 @@ int mn_tls_handshake(const struct mn_cfg *cfg, struct mn_ca *ca,
 {
     char reason[MN_TLS_REASON_CAP], creason[MN_TLS_REASON_CAP];
     const br_x509_trust_anchor *anchors;
-    struct mn_tls t;
+    struct mn_tls *t = NULL;
     br_ssl_session_parameters sp;
     size_t n_anchors;
     int64_t deadline, connect_deadline = 0;
@@ -2410,22 +2653,32 @@ int mn_tls_handshake(const struct mn_cfg *cfg, struct mn_ca *ca,
         status = -1;
         goto done;
     }
-    memset(&t, 0, sizeof t);
-    t.fd = fd;
-    t.deadline = connect_deadline != 0 ? connect_deadline : deadline;
-    if (tls_setup(&t, anchors, n_anchors, host) != 0) {
-        rc = tls_failure_rc(&t);
+    t = (struct mn_tls *)calloc(1, sizeof(*t));
+    if (t == NULL) {
+        close(fd);
+        rc = E_TLS_HANDSHAKE;
+        tls_copy_literal(reason, sizeof reason, "out_of_memory");
+        tls_set_err(err, errlen, "reason=out_of_memory");
+        status = -1;
+        goto done;
+    }
+    t->fd = fd;
+    t->deadline = connect_deadline != 0 ? connect_deadline : deadline;
+    if (tls_setup(t, anchors, n_anchors, host) != 0) {
+        rc = tls_failure_rc(t);
         why = tls_reason_for_rc(rc);
         tls_copy_literal(reason, sizeof reason, why);
         tls_set_err(err, errlen, "reason=%s br_err=%d", why,
-                    br_ssl_engine_last_error(&t.sc.eng));
+                    br_ssl_engine_last_error(&t->sc.eng));
+        mn_secure_zero(t, sizeof(*t));
+        free(t);
         close(fd);
         status = -1;
         goto done;
     }
-    rc = tls_pump_handshake(&t);
+    rc = tls_pump_handshake(t);
     if (rc == 0) {
-        br_ssl_engine_get_session_parameters(&t.sc.eng, &sp);
+        br_ssl_engine_get_session_parameters(&t->sc.eng, &sp);
         if (tls_version != NULL) {
             *tls_version = sp.version;
         }
@@ -2440,8 +2693,10 @@ int mn_tls_handshake(const struct mn_cfg *cfg, struct mn_ca *ca,
         why = tls_reason_for_rc(rc);
         tls_copy_literal(reason, sizeof reason, why);
         tls_set_err(err, errlen, "reason=%s br_err=%d", why,
-                    br_ssl_engine_last_error(&t.sc.eng));
+                    br_ssl_engine_last_error(&t->sc.eng));
     }
+    mn_secure_zero(t, sizeof(*t));
+    free(t);
     close(fd);
     status = -1;
 

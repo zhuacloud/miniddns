@@ -35,6 +35,18 @@ struct mn_detect_result {
     int  source;                 /* 0 none, 1 iface, 2 external */
 };
 
+/* Quiet local interface detection (zero network/TLS, no log output) for event
+   snapshot diffing: computes an order-independent signature over all allowed
+   IFF_UP interfaces' IPv4 addresses and (unless ipv4_mode is off/external) the
+   selected local IPv4. */
+int mn_detect_ipv4_iface_only(const struct mn_cfg *cfg,
+                              const struct mn_addr_set *addrs,
+                              struct mn_detect_result *res,
+                              uint64_t *v4_if_sig);
+int mn_detect_ipv6_quiet(const struct mn_cfg *cfg,
+                         const struct mn_addr_set *addrs,
+                         struct mn_detect_result *res);
+
 /* 0 = found (result->ip), E_NO_IP = no publishable address, other = transport error */
 int mn_detect_ipv4(const struct mn_cfg *cfg, const struct mn_addr_set *addrs,
                    struct mn_ca *ca, struct mn_detect_result *res,

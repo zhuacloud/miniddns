@@ -3,6 +3,7 @@
 #define MN_UTIL_H
 
 #include "miniddns.h"
+#include <sys/stat.h>
 
 int64_t  mn_now_ms(void);                       /* CLOCK_MONOTONIC */
 time_t   mn_wall(void);                         /* CLOCK_REALTIME */
@@ -12,7 +13,12 @@ int      mn_strlcpy(char *dst, size_t cap, const char *src); /* 0 ok, -1 truncat
 int      mn_strlcat(char *dst, size_t cap, const char *src);
 void     mn_secure_zero(void *p, size_t n);
 
-/* §03: token = O_NOFOLLOW; conf/ca = realpath + fstat(target); size/owner/mode checks */
+/* §03: token = O_NOFOLLOW; conf/ca = realpath + fstat(target); size/owner/mode checks.
+   mn_checked_open returns fd >= 0 (caller closes) plus fstat size/stat/resolved path. */
+int      mn_checked_open(const char *path, int cls, int allow_non_root_owner,
+                         size_t *out_size, struct stat *out_st,
+                         char *real_out, size_t real_cap,
+                         char *err, size_t errlen);
 int      mn_checked_read(const char *path, int cls, char *buf, size_t cap,
                          size_t *len, int allow_non_root_owner,
                          char *err, size_t errlen);

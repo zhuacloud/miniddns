@@ -424,6 +424,25 @@ def main():
     check("empty CA returns E_CA_LOAD",
           r.returncode == 1 and "E_CA_LOAD" in out(r), out(r)[-400:])
 
+    # 26. v1.3 REQ-08: multi-A records perform only ONE external echo per cycle
+    two_a = ("[record]\nprovider = cf\nname = a1.example.com\ntype = A\n\n"
+             "[record]\nprovider = cf\nname = a2.example.com\ntype = A\n")
+    cfg_two_a = write_conf("two-a.conf", conf(ca_good, records=two_a))
+    write_state({"discover": [{"id": "rec123", "content": "1.1.1.1"}], "echo_ip": "1.1.1.1"})
+    clear_log(logfile)
+    r = run(base + ["--once", "-c", cfg_two_a], srv.port)
+    txt = log_text(logfile)
+    echo_gets = [l for l in txt.splitlines() if l.startswith("GET / ")]
+    check("multi-A caches external echo once per cycle",
+          r.returncode == 0 and len(echo_gets) == 1 and "tls=3" in out(r),
+          "echo_gets=%d out=%s" % (len(echo_gets), out(r)[-400:]))
+
+    # 27. v1.3 REQ-08/07: cycle end logs reason= and tls=, and external mode emits no spurious private-cgnat-only warn
+    check("cycle end includes reason= and tls=",
+          "reason=boot tls=" in out(r), out(r)[-400:])
+    check("external mode emits no spurious private-cgnat-only warn",
+          "private-cgnat-only" not in out(r), out(r)[-400:])
+
     srv.close()
     wrong.close()
     for n in ("test-ca.pem", "test-ca-untrusted.pem", "test-ca-wrong.pem", "empty.pem"):

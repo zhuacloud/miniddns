@@ -597,35 +597,88 @@ static int validate(struct parser *ps, int diagnostic)
     return 0;
 }
 
-int mn_cfg_load(const char *cli_path, int diagnostic, int allow_non_root_owner,
-                struct mn_cfg *cfg, char *err, size_t errlen)
+int mn_cfg_load_ex(const char *cli_path, int diagnostic, int allow_non_root_owner,
+                   struct mn_cfg *cfg, int *io_err, char *err, size_t errlen)
 {
-    char root[MN_PATH_MAX], path[MN_PATH_MAX], *buf;
-    size_t len = 0;
+    char root[MN_PATH_MAX], path[MN_PATH_MAX], *buf = NULL;
+    size_t fsize = 0, total = 0;
     struct parser ps;
-    int rc;
+    int fd = -1, rc;
+
+    if (io_err) *io_err = 0;
     memset(&ps, 0, sizeof(ps));
     ps.cfg = cfg;
     mn_find_artifact_root(root, sizeof(root));
     mn_cfg_defaults(cfg, root);
-    if (mn_resolve_conf_path(cli_path, root, path, sizeof(path), ps.err, sizeof(ps.err)) != 0)
+    if (mn_resolve_conf_path(cli_path, root, path, sizeof(path), ps.err, sizeof(ps.err)) != 0) {
+        if (io_err) *io_err = 1;
         goto fail;
-    buf = (char *)malloc(MN_LIMIT_CONF_FILE + 1);
-    if (!buf) { snprintf(ps.err, sizeof(ps.err), "out of memory"); goto fail; }
-    if (mn_checked_read(path, MN_FILE_CONF, buf, MN_LIMIT_CONF_FILE + 1, &len,
-                        allow_non_root_owner, ps.err, sizeof(ps.err)) != 0) {
-        free(buf); goto fail;
     }
-    (void)len;
+    fd = mn_checked_open(path, MN_FILE_CONF, allow_non_root_owner, &fsize, NULL,
+                         NULL, 0, ps.err, sizeof(ps.err));
+    if (fd < 0) {
+        if (io_err) *io_err = 1;
+        goto fail;
+    }
+    buf = (char *)malloc(fsize + 1u);
+    if (!buf) {
+        snprintf(ps.err, sizeof(ps.err), "out of memory");
+        if (io_err) *io_err = 1;
+        goto fail;
+    }
+    while (total < fsize) {
+        ssize_t r = read(fd, buf + total, fsize - total);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            snprintf(ps.err, sizeof(ps.err), "config: read failed path=%.400s errno=%d", path, errno);
+            if (io_err) *io_err = 1;
+            goto fail;
+        }
+        if (r == 0) break;
+        total += (size_t)r;
+    }
+    {
+        unsigned char extra;
+        ssize_t r;
+        do {
+            r = read(fd, &extra, 1);
+        } while (r < 0 && errno == EINTR);
+        if (r < 0) {
+            snprintf(ps.err, sizeof(ps.err), "config: read failed path=%.400s errno=%d", path, errno);
+            if (io_err) *io_err = 1;
+            goto fail;
+        }
+        if (r > 0) {
+            snprintf(ps.err, sizeof(ps.err),
+                     total >= (size_t)MN_LIMIT_CONF_FILE
+                         ? "config: file too large path=%.400s"
+                         : "config: file changed during read path=%.400s",
+                     path);
+            if (io_err) *io_err = 1;
+            goto fail;
+        }
+    }
+    close(fd);
+    fd = -1;
+    buf[total] = '\0';
     rc = parse_lines(&ps, buf);
     free(buf);
+    buf = NULL;
     if (rc != 0) goto fail;
     if (validate(&ps, diagnostic) != 0) goto fail;
     snprintf(cfg->conf_path, sizeof(cfg->conf_path), "%s", path);
     return 0;
 fail:
+    if (fd >= 0) close(fd);
+    free(buf);
     if (err && errlen) snprintf(err, errlen, "%s", ps.err);
     return E_CFG;
+}
+
+int mn_cfg_load(const char *cli_path, int diagnostic, int allow_non_root_owner,
+                struct mn_cfg *cfg, char *err, size_t errlen)
+{
+    return mn_cfg_load_ex(cli_path, diagnostic, allow_non_root_owner, cfg, NULL, err, errlen);
 }
 
 void mn_cfg_print(const struct mn_cfg *cfg)
