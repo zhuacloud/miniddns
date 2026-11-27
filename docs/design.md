@@ -1639,7 +1639,7 @@ systemctl show -p CPUUsageNSec -p MemoryPeak miniddns
 > **现网校准（v1.3.1，`0.0.1-rc3` musl 静态版，x86_64，系统 CA 包 148 锚点，systemd 257）**：`MemoryCurrent` 500 KiB、`VmRSS` 520 KiB、`RssAnon` 168 KiB、`VmHWM` 520 KiB、`VmPeak` 780 KiB、`smaps [stack] Rss` 36 KiB（比门禁多一页，较 rc2 的 124 KiB 降 71%），二进制 355,680 B。两点勘误：
 >
 > 1. systemd ≥ 254 的 cgroup `MemoryPeak` 包含 `systemd-executor` 搭建沙箱的瞬时开销（同一加固集合下 `/bin/sleep` 亦达约 2.3 MiB），峰值门禁以 `VmHWM` 为准。
-> 2. 24 h CPU 与 RA 速率线性相关，预算 = `96 × 单周期 CPU + N_RA × 单次过滤 CPU`：现网 RA ≈ 2,050 次/天（设计假设约 1,200），单周期 11.4 ms（ECDSA 链含 P-384 根证书验签，是 BearSSL 0.6 通用实现的固有成本），v1.3.1 修复前实测外推约 2.7 s/24 h，修复后预计约 1.5–1.6 s/24 h——处于目标边缘、硬上限内有余量；评估该门禁时必须同时报告 RA 速率。
+> 2. 24 h CPU 与 RA 速率线性相关，预算 = `96 × 单周期 CPU + N_RA × 单次过滤 CPU`：现网 RA ≈ 2,050 次/天（设计假设约 1,200），单周期 11.4 ms（ECDSA 链含 P-384 根证书验签，是 BearSSL 0.6 通用实现的固有成本），v1.3.1 修复前实测外推约 2.7 s/24 h；修复后（`0.0.1-rc4`，31 分钟窗口实测）单周期 10.4 ms、单次过滤 0.2 ms（约 1,950 次/天），外推约 1.4 s/24 h——处于目标内、硬上限内有余量；评估该门禁时必须同时报告 RA 速率。
 
 ### 14.6 代码质量门禁
 

@@ -95,6 +95,7 @@ CPU 的实测构成（cgroup `cpu.stat` 1 Hz 采样）：
 - `timer` cycle：**11.3 / 11.5 ms** 两次（rc2 长期均值 ≈ 12.9 ms/cycle：87.5 s ÷ 约 6,800 cycle；§1.1 的 22.5 ms 为单次采样高值）。本地 mock 复现显示单次 TLS 请求的 CPU 取决于证书链：P-256 根 3.13 ms，**生产同款链（P-256 叶子/中间证书 + P-384 根 GTS Root R4）6.42 ms**——P-384 验签走 BearSSL 0.6 通用的 `ec_prime_i31`，上游任何发布版都没有 64 位或 P-384 专用实现，无安全可行的代码级优化手段。
 - RA 突发：现网约 **87 次/小时（≈ 2,050 次/天**，rc2 过去 24 h 共 1,994 个 `reason=event` cycle），每个仍耗 **0.78 ms**，呈两段式：突发到达时 ~0.25 ms，`debounce_ms` 后 ~0.55 ms（layer-2 `mn_nl_rescan()`）。`/proc/<pid>/syscall` 轮询证实每个突发后精确 +1.5001 s 有一段活动。
 - 外推：96 × 11.4 ms + 2,050 × 0.78 ms ≈ **2.7 s/24 h**。
+- **修复后复测（`0.0.1-rc4`，同一主机，31 分钟窗口）**：40 个 RA 突发每个 0.20 ms（中位数 0.198 ms，单个采样点），`timer` cycle 10.57 / 10.29 ms，外推 ≈ **1.4 s/24 h**；`/proc/<pid>/syscall` 轮询（6 分钟，8 个突发）显示突发后 (1, 3] s 内零活动。
 
 **根因（layer-1 漏判）**：rtnetlink 被动监听（解析 `IFA_FLAGS` 属性）显示每个 RA 突发含 3 条 `RTM_NEWADDR`：preferred 地址刷新（`IFA_FLAGS=0x100`，命中指纹）、**deprecated 地址连续两条**——`IFA_FLAGS=0x100`（无 DEPRECATED，`ifa_prefered=0`）与 `IFA_FLAGS=0x120`。对照内核 `net/ipv6/addrconf.c`（v6.12）`addrconf_prefix_rcv_add_addr()`：
 
@@ -138,7 +139,7 @@ dump 路径（`inet6_fill_ifaddr()` 原样输出 `ifa->flags`）里该地址的�
 | 主线程栈物理驻留（`[stack] Rss`） | **≤ 32 KiB**（现网 36 KiB，超一页） | **≤ 32 KiB**（改前 124 KiB） | 未单列 | `/proc/<pid>/smaps` `[stack]` 段 `Rss`（mock / 本地） |
 | 峰值内存（`MemoryPeak` / `VmHWM`） | **≤ 1.0 MiB**（rc3 现网 `VmHWM` 520 KiB；cgroup `MemoryPeak` 不适用于 systemd ≥ 254，见 §1.3） | **≤ 2.8 MiB** | ≤ 6 MB | `MemoryPeak` / `VmHWM`（mock + 生产） |
 | 虚拟内存峰值（`VmPeak`） | **≤ 1.5 MiB**（rc3 现网 780 KiB） | **≤ 3.8 MiB**（改前 5.03 MiB） | 未单列 | `/proc/<pid>/status` `VmPeak`（mock + 生产） |
-| 24 h 稳态累计 CPU（`CPUUsageNSec`） | **≤ 1.5 s**（硬上限 2.0 s；v1.3.1 修复后现网预算 ≈ 1.5–1.6 s，与 RA 速率线性相关，见 §1.3） | **≤ 1.5 s**（硬上限 2.0 s） | ≤ 2.0 s | `systemctl show -p CPUUsageNSec`（生产 24 h）+ mock soak |
+| 24 h 稳态累计 CPU（`CPUUsageNSec`） | **≤ 1.5 s**（硬上限 2.0 s；v1.3.1 修复后现网实测外推 ≈ 1.4 s，与 RA 速率线性相关，见 §1.3） | **≤ 1.5 s**（硬上限 2.0 s） | ≤ 2.0 s | `systemctl show -p CPUUsageNSec`（生产 24 h）+ mock soak |
 | 24 h 稳态写请求数 | **0** | **0** | 0 | mock 集成 + 生产日志审计 |
 | 二进制体积（stripped） | **≤ 380 KB**（硬上限 500 KB） | **≤ 320 KB** | ≤ 500 KB | `stat -c %s` |
 
@@ -327,7 +328,7 @@ dump 路径（`inet6_fill_ifaddr()` 原样输出 `ifa->flags`）里该地址的�
 | `VmPeak`（虚拟内存峰值） | 5,148 KiB | **~3.1–3.5 MiB** | **~750–1,100 KiB** | 消灭 2 MiB CA 映射与双重 256 KiB 配置读 |
 | 24 h 稳态累计 CPU | **27.0 s**（生产 74 h 均值） | **~0.8–1.2 s**（≤ 1.5 s） | **~0.8–1.2 s**（≤ 1.5 s） | `REQ-07` 消除 RA 风暴(-92%) + `REQ-08` 缓存/`i62`/合并(-50%) |
 
-**现网实测对照（rc3，见 §1.3）**：内存各项均落在或优于 musl 列的预计区间（`VmRSS` 520 KiB、`RssAnon` 168 KiB、`VmHWM` 520 KiB、`VmPeak` 780 KiB、`MemoryCurrent` 500 KiB），`[stack] Rss` 36 KiB 略高于预计；CPU 从 27.0 s 降至约 2.7 s/24 h（−90%），但高于预计的 0.8–1.2 s：单周期 11.4 ms 受 P-384 根证书验签限制，RA 速率约为设计假设的 1.7 倍，且 layer-1 漏判使每个 RA 仍耗 0.78 ms。v1.3.1 修复后的预算为 96 × 11.4 ms + 2,050 × ≤0.25 ms ≈ 1.5–1.6 s/24 h。
+**现网实测对照（rc3，见 §1.3）**：内存各项均落在或优于 musl 列的预计区间（`VmRSS` 520 KiB、`RssAnon` 168 KiB、`VmHWM` 520 KiB、`VmPeak` 780 KiB、`MemoryCurrent` 500 KiB），`[stack] Rss` 36 KiB 略高于预计；CPU 从 27.0 s 降至约 2.7 s/24 h（−90%），但高于预计的 0.8–1.2 s：单周期 11.4 ms 受 P-384 根证书验签限制，RA 速率约为设计假设的 1.7 倍，且 layer-1 漏判使每个 RA 仍耗 0.78 ms。v1.3.1 修复后的预算为 96 × 11.4 ms + 2,050 × ≤0.25 ms ≈ 1.5–1.6 s/24 h；`0.0.1-rc4` 现网实测（31 分钟窗口）单周期 10.4 ms、单次过滤 0.20 ms，外推 ≈ 1.4 s/24 h。
 
 ---
 
@@ -383,7 +384,7 @@ dump 路径（`inet6_fill_ifaddr()` 原样输出 `ifa->flags`）里该地址的�
 | **V1.3-M2：CPU 治理（优先止血）** | `REQ-07`、`REQ-08` | `nl_addr` 跟踪 `IFF_UP\|IFF_RUNNING` + 地址指纹表拦截 RA 刷新 + 无关接口过滤；`main` 二级本地快照比对（`carrier_changed` 绕过、跳过保退避）；`provider` 按族缓存 detect；`tls_http` 恢复 `i62` 默认 RSA 验签；`prov_cloudflare` 双栈 `A+AAAA` 合并 discover（含 `total_pages > 1` 回退）；`cycle end` 追加 `reason=`/`tls=`；同步回写 `design §05.2/§05.3/§05.4/§07.3/§08.1` | ① `socketpair` 单测与 `unshare` RA 压测 0 次多余 TLS 握手；② NAT `IFF_RUNNING` 翻转秒级触发；③ 双栈同域名每轮仅 1 次 Cloudflare discover；④ `test` / `test-asan` / `spec-check` 全绿；⑤ 生产复测 24 h 折算 CPU ≤ 1.5 s |
 | **V1.3-M3：I/O 峰值消灭与堆治理** | `REQ-02`、`REQ-03`、`REQ-06` | `mn_checked_open()`；CA 4 KiB 流式解析 + `dn` 复用 + `1.5×` 扩容；token 576 B 栈读首行；配置单次精确读取；glibc `mallopt` + `malloc_trim(0)`；同步回写 `design §09.1/§09.2` | ① `soak.py` glibc `RssAnon` 从 644 KiB 降至 ≤ 420 KiB、`VmPeak` 降幅 ≥ 1.5 MiB；② 1 B/7 B/4096 B CA 跨块与 TOCTOU 单测全绿；③ `test-asan` + `valgrind` 零泄漏 |
 | **V1.3-M4：栈物理驻留瘦身与收尾** | `REQ-04`、`REQ-05` | `struct app`、32 KiB netlink 缓冲、`struct mn_tls` 离栈（清零释放）并收窄局部头缓冲；`mn_addr_set` 周期化；HTTP 原地解析；按实测决定是否做 P2 项；同步回写 `design §08.1`、执行 `make doc` 与 `CHANGELOG.md` 更新 | ① `soak.py` 双轨门禁全绿（glibc `smaps [stack] Rss ≤ 32 KiB`、`RssAnon ≤ 320 KiB`、`VmRSS ≤ 2,458 KiB`；musl 达校准门禁）；② `test` / `test-asan` / `valgrind` / `spec-check` / `verify-units` 全绿；③ 8 平台 `make dist` 通过 |
-| **V1.3.1：layer-1 DEPRECATED 归一化（勘误）** | `REQ-07` | `mn_nl_decode_addr()` 对 `ifa_prefered == 0` 的 IPv6 地址置 `IFA_F_DEPRECATED`，消除内核“清除/重置 DEPRECATED”消息对造成的逐 RA 漏判（§1.3）；单测回放现网三消息突发 | ① 新增单测修复前必红、修复后全绿；② `test` / `test-asan` / `spec-check` 全绿；③ 生产复测：RA 突发后不再出现 `debounce_ms` 之后的第二段活动，24 h 折算 CPU ≤ 2.0 s |
+| **V1.3.1：layer-1 DEPRECATED 归一化（勘误）** | `REQ-07` | `mn_nl_decode_addr()` 对 `ifa_prefered == 0` 的 IPv6 地址置 `IFA_F_DEPRECATED`，消除内核“清除/重置 DEPRECATED”消息对造成的逐 RA 漏判（§1.3）；单测回放现网三消息突发 | ① 新增单测修复前必红、修复后全绿；② `test` / `test-asan` / `spec-check` 全绿；③ 生产复测：RA 突发后不再出现 `debounce_ms` 之后的第二段活动，24 h 折算 CPU ≤ 2.0 s（`0.0.1-rc4` 于 2026-11-27 复测通过，外推 ≈ 1.4 s/24 h，见 §1.3） |
 
 ---
 

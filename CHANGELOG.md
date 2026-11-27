@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- docs: rc4 production verification of the v1.3.1 netlink fix recorded (per-cycle 10.4 ms, per-RA 0.2 ms, about 1.4 s CPU per 24 h projected on the production host).
 - netlink: normalise `IFA_F_DEPRECATED` from `IFA_CACHEINFO.ifa_prefered == 0` for IPv6 addresses (spec v1.3.1). The kernel clears the flag before the first `RTM_NEWADDR` of every RA lifetime update and re-sets it in `addrconf_verify()`, so the transient message missed the layer-1 fingerprint and armed the debounce on each RA (measured on the production host: about 0.8 ms plus a rescan per RA, ~87 RA/h). A unit test now replays the captured three-message burst.
 - daemon: schedule retries after the boot cycle (including clock-guard 30 s retries) and install signals before boot; the first backoff step is now really 5 s.
 - daemon: ignore and log SIGHUP, handle poll/signalfd/timerfd errors, and remove duplicate overflow resync/logging.
