@@ -7,6 +7,7 @@ create a circular hash dependency.  It includes everything needed to build
 the binary (Makefile, src/, third_party/, conf/, docs/, systemd/, tests/).
 """
 import argparse
+import gzip
 import os
 import subprocess
 import sys
@@ -44,23 +45,25 @@ def main():
             continue
         selected.append((rel, full))
 
-    with tarfile.open(output, "w:gz", format=tarfile.GNU_FORMAT) as tf:
-        for rel, full in selected:
-            ti = tarfile.TarInfo(prefix + rel)
-            ti.mtime = 0
-            ti.uid = ti.gid = 0
-            ti.uname = ti.gname = ""
-            if os.path.islink(full):
-                ti.type = tarfile.SYMTYPE
-                ti.linkname = os.readlink(full)
-                ti.mode = 0o777
-                tf.addfile(ti)
-                continue
-            st = os.stat(full)
-            ti.size = st.st_size
-            ti.mode = 0o755 if (st.st_mode & 0o111) else 0o644
-            with open(full, "rb") as f:
-                tf.addfile(ti, f)
+    with open(output, "wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+            with tarfile.open(fileobj=gz, mode="w|", format=tarfile.GNU_FORMAT) as tf:
+                for rel, full in selected:
+                    ti = tarfile.TarInfo(prefix + rel)
+                    ti.mtime = 0
+                    ti.uid = ti.gid = 0
+                    ti.uname = ti.gname = ""
+                    if os.path.islink(full):
+                        ti.type = tarfile.SYMTYPE
+                        ti.linkname = os.readlink(full)
+                        ti.mode = 0o777
+                        tf.addfile(ti)
+                        continue
+                    st = os.stat(full)
+                    ti.size = st.st_size
+                    ti.mode = 0o755 if (st.st_mode & 0o111) else 0o644
+                    with open(full, "rb") as f:
+                        tf.addfile(ti, f)
 
     print(output)
     return 0
