@@ -472,6 +472,7 @@ main()
 | 读取 | 每次 `recvmsg` 读 32 KiB，循环 `NLMSG_OK` 遍历。必须处理消息被拆分（`NLMSG_DONE` 之外的截断靠 buffer 大小避免） |
 | 关注的事件 | `RTM_NEWADDR`、`RTM_DELADDR`、`RTM_NEWLINK`、`RTM_DELLINK`；收到 LINK 类事件时刷新 ifindex 表（`ifname`/`IFF_UP`） |
 | 解码内容 | `ifaddrmsg`{family, prefixlen, flags, scope, index} + attrs：`IFA_ADDRESS`、`IFA_LOCAL`、`IFA_FLAGS`（32 位，优先于 `ifa_flags` 那 8 位）、`IFA_CACHEINFO`（valid/preferred lifetime）、`IFA_LABEL`（**仅 IPv4 存在**，仅用作冗余校验；接口名一律 `if_indextoname(ifa_index)`） |
+| DEPRECATED 归一化 `v1.3.1` | 解码 `AF_INET6` 地址时，若带 `IFA_CACHEINFO` 且 `ifa_prefered == 0`，则**无条件视为含 `IFA_F_DEPRECATED`**（只置位、不清除；IPv4 不处理）。原因：内核 `addrconf_prefix_rcv_add_addr()` 在每次 RA 生命周期更新时先清除 `IFA_F_DEPRECATED` 并发出第一条 `RTM_NEWADDR`，随后 `addrconf_verify()` 对 `prefered_lft == 0` 的地址重新置位并发出第二条；第一条消息（`IFA_FLAGS` 无 DEPRECATED、`ifa_prefered=0`）与 dump 路径（`inet6_fill_ifaddr()` 原样输出 `ifa->flags`）的指纹不一致，会让 §05.3 的 RA 过滤在每个 RA 上漏判并触发 debounce。归一化后事件与 dump 描述同一有效状态；真实的状态转换（两个方向）仍改变指纹 |
 | `ENOBUFS` | **必须**：`recvmsg` 返回 `ENOBUFS` 时 log warn + 重新执行一次全量 dump（含 LINK）重建状态，**同时清 `pending` 并取消当前 debounce 窗口**（说明内核丢事件，任何增量假设都不可信） |
 | 权限 | 不需要 root、不需要 `CAP_NET_ADMIN` |
 
@@ -483,7 +484,7 @@ main()
 
 一次地址变化会产生多条事件（`tentative`→`preferred`、deprecate、临时地址增删）。因此：
 
-- 收到净变化地址事件或允许接口的 `IFF_UP`/`IFF_RUNNING` 状态翻转（或 `if_indextoname` 失败 fail-open）→ 置 `pending=1`，并把 debounce deadline 设为 `now + debounce_ms`；纯 IPv6 RA `IFA_CACHEINFO` 生命周期刷新与排除接口噪声直接过滤，不触发 debounce（v1.3）
+- 收到净变化地址事件或允许接口的 `IFF_UP`/`IFF_RUNNING` 状态翻转（或 `if_indextoname` 失败 fail-open）→ 置 `pending=1`，并把 debounce deadline 设为 `now + debounce_ms`；纯 IPv6 RA `IFA_CACHEINFO` 生命周期刷新与排除接口噪声直接过滤，不触发 debounce（v1.3）；`IFA_F_DEPRECATED` 先按 §05.2 的 `ifa_prefered == 0` 规则归一化后再比对指纹（v1.3.1）
 - debounce 窗口内再来的事件 → **重置** deadline（滑窗静默）
 - 窗口静默到期 → 执行一次 cycle，清 `pending`
 - 连续事件导致 deadline 不断后移时，设硬上限 `max_defer = 10 × debounce_ms`，超时强制执行（防止 ISP 抖动导致永不执行）
@@ -628,6 +629,7 @@ OpenWrt 等无 RTC 设备开机时 `time()` 可能返回 1970。TLS 会以“证
 - `IFA_CACHEINFO.ifa_valid` > 0（不为 `0sec`）
 - 不落在 §06.1 的不可发布前缀（先要求 `2000::/3`）
 - 接口名（**`if_indextoname(ifa_index)`**，不是 `IFA_LABEL`）通过 include/exclude 过滤
+- （v1.3.1）IPv6 地址的 `IFA_F_DEPRECATED` 在解码时按 `IFA_CACHEINFO.ifa_prefered == 0` 归一化（§05.2）：`preferred` 生命周期已耗尽的地址一律按 deprecated 剔除
 
 全部被过滤掉时返回“无”，并 log（注意每个过滤原因用**独立的 key**，不要拼成 `filtered=temporary=2,dadfailed=1` 这种不可解析形式）：
 
@@ -1559,6 +1561,7 @@ This bundle is a FALLBACK. Prefer the system store when available.
 | `ipv6_classify` | `2000::/3` 内外、`::ffff:1.2.3.4`、`64:ff9b::1`、`fec0::1`、`100::1`、`2001:db8::1` 各一例 |
 | `ipv6_filter` | 构造 `ifaddrmsg`+`IFA_FLAGS` 二进制样本：temporary / deprecated / tentative / dadfailed / valid_lft=0 各一例必须被剔除；**构造不含 `IFA_LABEL` 的 IPv6 消息**，断言 `iface_exclude` 仍生效（`if_indextoname` 路径） |
 | `iface_up` | `IFF_UP=0` 的接口即使有 global 地址也必须被剔除（§06.3） |
+| `nl_decode` / `nl_ra_filter` | 构造 `ifaddrmsg` + `IFA_ADDRESS`/`IFA_FLAGS`/`IFA_CACHEINFO` 消息：`IFA_FLAGS`(32 位) 覆盖 `ifa_flags`；`ifa_prefered == 0` 的 IPv6 地址归一化出 `IFA_F_DEPRECATED`，`ifa_prefered > 0` 与 IPv4 不改写（v1.3.1）；经 `socketpair` 驱动 `mn_nl_drain_filtered()`：RA 纯生命周期刷新 → 0；**现网抓取的三消息 RA 突发**（preferred 地址刷新 + deprecated 地址的“清除/重置 DEPRECATED”对）→ 0；deprecated 与 preferred 两个方向的转换、`valid_lft=0` → 1；排除接口 / 链路本地 / `TENTATIVE` / `TEMPORARY` → 0；未知 ifindex fail-open → 1；`IFF_RUNNING` 翻转 → `carrier_changed=1` |
 | `http_parse` | 200 带 Content-Length；200 无 Content-Length（EOF）；**chunked（含分块到达、带 ext、空 trailer）**；头超限；body 超限；`Transfer-Encoding: gzip`；`Content-Encoding: gzip`；`Retry-After` 秒与 HTTP-date 两种 |
 | `ca_load` | tests/fixtures 里的 3 张 PEM：正常加载；坏 base64 跳过并计数；空文件报错；非 PEM 报错；**CA 路径为符号链接**时加载成功；arena 两段式布局后指针仍有效（ASan 下验） |
 | `json_util` | 取 `result[0].id`；取 `errors[0].message`（含 `\"`/`\uXXXX`）；缺字段；`success=false`；超长 message 截断 |
@@ -1632,6 +1635,11 @@ systemctl show -p CPUUsageNSec -p MemoryPeak miniddns
 | 24 h 累计 CPU（`CPUUsageNSec`） | ≤ 1.5 s | ≤ 1.5 s | 硬上限 ≤ 2 s |
 | 稳态写入请求 | 0 次/24 h | 0 次/24 h | IP 不变时 |
 | 二进制体积（stripped） | ≤ 380 KB（硬上限 500 KB） | ≤ 320 KB | `make dist` 均 strip |
+
+> **现网校准（v1.3.1，`0.0.1-rc3` musl 静态版，x86_64，系统 CA 包 148 锚点，systemd 257）**：`MemoryCurrent` 500 KiB、`VmRSS` 520 KiB、`RssAnon` 168 KiB、`VmHWM` 520 KiB、`VmPeak` 780 KiB、`smaps [stack] Rss` 36 KiB（比门禁多一页，较 rc2 的 124 KiB 降 71%），二进制 355,680 B。两点勘误：
+>
+> 1. systemd ≥ 254 的 cgroup `MemoryPeak` 包含 `systemd-executor` 搭建沙箱的瞬时开销（同一加固集合下 `/bin/sleep` 亦达约 2.3 MiB），峰值门禁以 `VmHWM` 为准。
+> 2. 24 h CPU 与 RA 速率线性相关，预算 = `96 × 单周期 CPU + N_RA × 单次过滤 CPU`：现网 RA ≈ 2,050 次/天（设计假设约 1,200），单周期 11.4 ms（ECDSA 链含 P-384 根证书验签，是 BearSSL 0.6 通用实现的固有成本），v1.3.1 修复前实测外推约 2.7 s/24 h，修复后预计约 1.5–1.6 s/24 h——处于目标边缘、硬上限内有余量；评估该门禁时必须同时报告 RA 速率。
 
 ### 14.6 代码质量门禁
 
@@ -1826,6 +1834,7 @@ root 模式（默认）：
 
 | 版本 | 变更 |
 | --- | --- |
+| 1.3.1 | netlink 过滤勘误（§05.2 / §05.3 / §06.3 / §14.1 / §14.5）：解码 `AF_INET6` 地址时按 `IFA_CACHEINFO.ifa_prefered == 0` 归一化 `IFA_F_DEPRECATED`。内核在每次 RA 生命周期更新时先清除再重置 DEPRECATED 并各发一条 `RTM_NEWADDR`，第一条消息与 dump 指纹不等，导致 RA 过滤在每个 RA 上漏判并触发 debounce（现网每个 RA 多耗约 0.8 ms）。新增三消息回放单测；§14.5 补充现网校准值、cgroup `MemoryPeak` 在 systemd ≥ 254 上的口径说明与 RA 速率相关的 CPU 预算。无配置变更 |
 | 1.3-M4 | 栈常驻与 HTTP 原地解析瘦身（§08.1 / §08.3）：`struct app`、`struct mn_tls`（退出前 `mn_secure_zero`）、netlink 32 KiB 缓冲、`struct mn_addr_set` 移出栈/长生命周期，改用按需 `calloc`/`free` 与 `realpath(..., NULL)`，收缩 `tls_http`/`prov_cloudflare`/`provider` 栈缓冲并拆分 `tls_build_wire`；新增 `mn_http_parse_in_place()` 消除 HTTP 响应双拷贝与冗余 `raw` 保留 |
 | 1.3-M3 | 文件 I/O 峰值消灭与 glibc 堆治理（§03/§09.1/§09.2）：抽取 `mn_checked_open()`，CA 改为 4 KiB 流式分块解析与 `dn` 缓冲复用（消灭 2 MiB 分配）；token 改用 576 B 栈缓冲读首行（消灭 256 KiB 零填充）；配置改为单次按 `st_size` 精确读取；glibc 路径增加 `mallopt(M_MMAP_THRESHOLD, 16 KiB)` 与 `malloc_trim(0)` |
 | 1.3-M2 | CPU 治理（§05.2/§05.3/§05.4/§07.3/§08.1）：netlink 跟踪 `IFF_UP\|IFF_RUNNING` 并维护地址指纹表拦截 IPv6 RA 纯生命周期刷新与排除接口噪声；非 carrier 的 `reason=event` 无本地变化时跳过远端请求且保留退避状态；cycle 内按族缓存探测；恢复 BearSSL 64 位默认 `i62` RSA 验签；同域名双栈 `A+AAAA` 合并 discover（`per_page=100`，分页自动回退）；`cycle end` 追加 `reason=`/`tls=` |

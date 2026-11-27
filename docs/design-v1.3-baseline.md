@@ -2,7 +2,7 @@
 
 > **Requirements & Design Baseline** · 低 CPU、低内存、低峰值与双轨可验证演进基线
 >
-> 状态：**设计基线（经交叉审查修订）** · 基于权威规格：[`docs/design.md`](design.md) v1.2（含 1.2.1–1.2.4 修订）
+> 状态：**设计基线（经交叉审查修订）** · 含 v1.3.1 勘误（现网复测回写，2026-11-27）· 基于权威规格：[`docs/design.md`](design.md) v1.2（含 1.2.1–1.2.4 修订）
 >
 > 版本命名空间说明（见 [`docs/RELEASE_PROCESS.md`](RELEASE_PROCESS.md) §1）：
 > - **设计规格版本**：本文档定义 **v1.3** 演进基线；**每个里程碑合入时同步回写** [`docs/design.md`](design.md) 对应章节（遵循 `design §04.7`），避免规格与实现长期漂移。
@@ -74,6 +74,49 @@
 
 ---
 
+### 1.3 现网复测回写（0.0.1-rc3 musl 静态版，2026-11-27）
+
+将 GitHub Release 构建的 `miniddns-0.0.1-rc3-linux-x64-musl.tar.gz` 部署到同一生产主机（systemd 257，加固单元不变，配置与 token 未改动），boot cycle 后采集 34 分钟稳态窗口：
+
+| 维度 | rc2（glibc 动态） | rc3（musl 静态） | `design §14.5` musl 门禁 | 结论 |
+| --- | --- | --- | --- | --- |
+| `MemoryCurrent` | 976 KiB | **500 KiB** | ≤ 512 KiB | 达标 |
+| `VmRSS` | 2,736 KiB | **520 KiB** | ≤ 768 KiB | 达标（−81%） |
+| `RssAnon` | 640 KiB | **168 KiB** | ≤ 256 KiB | 达标（−74%，窗口内零增长） |
+| `VmHWM` | 2,736 KiB | **520 KiB** | ≤ 1.0 MiB | 达标 |
+| `VmPeak` | 5,148 KiB | **780 KiB** | ≤ 1.5 MiB | 达标（−85%） |
+| `smaps [stack] Rss` | 124 KiB | **36 KiB** | ≤ 32 KiB | ⚠️ 超一页（−71%）；mock 轨仍达标 |
+| cgroup `MemoryPeak` | 2,496 KiB | 2,456 KiB | ≤ 1.0 MiB | ❌ **指标口径问题**：同一加固集合下 `/bin/sleep` 的瞬态单元亦达 2,300 KiB（无沙箱 1,812 KiB），峰值来自 systemd 257 `systemd-executor` 搭建沙箱的阶段，与守护进程无关；峰值门禁以 `VmHWM` 为准 |
+| 二进制（stripped） | 336,104 B（动态、未 strip） | **355,680 B** | ≤ 380 KB | 达标 |
+| 24 h 折算 CPU | **≈ 27.0 s**（77.9 h 均值） | **≈ 2.7 s**（窗口外推） | ≤ 1.5 s（硬上限 2 s） | ❌ **仍超目标**，根因见下 |
+
+CPU 的实测构成（cgroup `cpu.stat` 1 Hz 采样）：
+
+- `timer` cycle：**11.3 / 11.5 ms** 两次（rc2 长期均值 ≈ 12.9 ms/cycle：87.5 s ÷ 约 6,800 cycle；§1.1 的 22.5 ms 为单次采样高值）。本地 mock 复现显示单次 TLS 请求的 CPU 取决于证书链：P-256 根 3.13 ms，**生产同款链（P-256 叶子/中间证书 + P-384 根 GTS Root R4）6.42 ms**——P-384 验签走 BearSSL 0.6 通用的 `ec_prime_i31`，上游任何发布版都没有 64 位或 P-384 专用实现，无安全可行的代码级优化手段。
+- RA 突发：现网约 **87 次/小时（≈ 2,050 次/天**，rc2 过去 24 h 共 1,994 个 `reason=event` cycle），每个仍耗 **0.78 ms**，呈两段式：突发到达时 ~0.25 ms，`debounce_ms` 后 ~0.55 ms（layer-2 `mn_nl_rescan()`）。`/proc/<pid>/syscall` 轮询证实每个突发后精确 +1.5001 s 有一段活动。
+- 外推：96 × 11.4 ms + 2,050 × 0.78 ms ≈ **2.7 s/24 h**。
+
+**根因（layer-1 漏判）**：rtnetlink 被动监听（解析 `IFA_FLAGS` 属性）显示每个 RA 突发含 3 条 `RTM_NEWADDR`：preferred 地址刷新（`IFA_FLAGS=0x100`，命中指纹）、**deprecated 地址连续两条**——`IFA_FLAGS=0x100`（无 DEPRECATED，`ifa_prefered=0`）与 `IFA_FLAGS=0x120`。对照内核 `net/ipv6/addrconf.c`（v6.12）`addrconf_prefix_rcv_add_addr()`：
+
+```c
+if (update_lft) {
+        ifp->valid_lft = valid_lft;
+        ifp->prefered_lft = prefered_lft;
+        WRITE_ONCE(ifp->tstamp, now);
+        flags = ifp->flags;
+        ifp->flags &= ~IFA_F_DEPRECATED;     /* 先清除 */
+        spin_unlock_bh(&ifp->lock);
+        if (!(flags&IFA_F_TENTATIVE))
+                ipv6_ifa_notify(0, ifp);     /* 第 1 条：IFA_FLAGS 无 DEPRECATED */
+}
+...
+addrconf_verify(net);                         /* age >= prefered_lft(0) → 重新置位，发第 2 条 */
+```
+
+dump 路径（`inet6_fill_ifaddr()` 原样输出 `ifa->flags`）里该地址的指纹 `crit_flags` 为 `0x20`，第 1 条消息为 `0x0`，`nl_addr_matches_fp()` 判不等 → `interesting` → debounce → layer-2 快照比对后跳过（无 TLS，正确性无损），但每个 RA 都付出一次 rescan。注意 `ip -6 addr change`（`inet6_addr_modify()`）只发一条带 DEPRECATED 的通知，**无法复现这对消息**，因此 M2 的 netns RA 压测没有发现该问题；修复与回归测试见 §5.2.1 第 4 条与 §8.2。
+
+---
+
 <a name="s2" id="s2"></a>
 
 ## 02 演进目标、非目标与新版双轨门禁
@@ -89,17 +132,17 @@
 
 | 指标 | musl 静态生产版（推荐）\* | glibc 动态兼容版 | `design §14.5` 旧门禁 | 采集方式与验收环境 |
 | --- | --- | --- | --- | --- |
-| 常驻 cgroup 内存（`MemoryCurrent`） | **≤ 512 KiB**（待 rc2 实测校准） | **≤ 640 KiB** | ≤ 2.5 MB | `systemctl show -p MemoryCurrent`（生产主机） |
-| 进程常驻集（`VmRSS`） | **≤ 768 KiB**（待 rc2 实测校准） | **≤ 2,458 KiB（2.4 MiB）** | ≤ 2.5 MB | `/proc/<pid>/status` `VmRSS`（mock + 生产） |
-| 进程私有内存（`RssAnon`） | **≤ 256 KiB**（待 rc2 实测校准） | **≤ 320 KiB**（改前 644 KiB） | 未单列 | `/proc/<pid>/status` `RssAnon`（mock + 生产） |
-| 主线程栈物理驻留（`[stack] Rss`） | **≤ 32 KiB** | **≤ 32 KiB**（改前 124 KiB） | 未单列 | `/proc/<pid>/smaps` `[stack]` 段 `Rss`（mock / 本地） |
-| 峰值内存（`MemoryPeak` / `VmHWM`） | **≤ 1.0 MiB**（待 rc2 实测校准） | **≤ 2.8 MiB** | ≤ 6 MB | `MemoryPeak` / `VmHWM`（mock + 生产） |
-| 虚拟内存峰值（`VmPeak`） | **≤ 1.5 MiB**（待 rc2 实测校准） | **≤ 3.8 MiB**（改前 5.03 MiB） | 未单列 | `/proc/<pid>/status` `VmPeak`（mock + 生产） |
-| 24 h 稳态累计 CPU（`CPUUsageNSec`） | **≤ 1.5 s**（硬上限 2.0 s） | **≤ 1.5 s**（硬上限 2.0 s） | ≤ 2.0 s | `systemctl show -p CPUUsageNSec`（生产 24 h）+ mock soak |
+| 常驻 cgroup 内存（`MemoryCurrent`） | **≤ 512 KiB**（rc3 现网 500 KiB） | **≤ 640 KiB** | ≤ 2.5 MB | `systemctl show -p MemoryCurrent`（生产主机） |
+| 进程常驻集（`VmRSS`） | **≤ 768 KiB**（rc3 现网 520 KiB） | **≤ 2,458 KiB（2.4 MiB）** | ≤ 2.5 MB | `/proc/<pid>/status` `VmRSS`（mock + 生产） |
+| 进程私有内存（`RssAnon`） | **≤ 256 KiB**（rc3 现网 168 KiB） | **≤ 320 KiB**（改前 644 KiB） | 未单列 | `/proc/<pid>/status` `RssAnon`（mock + 生产） |
+| 主线程栈物理驻留（`[stack] Rss`） | **≤ 32 KiB**（现网 36 KiB，超一页） | **≤ 32 KiB**（改前 124 KiB） | 未单列 | `/proc/<pid>/smaps` `[stack]` 段 `Rss`（mock / 本地） |
+| 峰值内存（`MemoryPeak` / `VmHWM`） | **≤ 1.0 MiB**（rc3 现网 `VmHWM` 520 KiB；cgroup `MemoryPeak` 不适用于 systemd ≥ 254，见 §1.3） | **≤ 2.8 MiB** | ≤ 6 MB | `MemoryPeak` / `VmHWM`（mock + 生产） |
+| 虚拟内存峰值（`VmPeak`） | **≤ 1.5 MiB**（rc3 现网 780 KiB） | **≤ 3.8 MiB**（改前 5.03 MiB） | 未单列 | `/proc/<pid>/status` `VmPeak`（mock + 生产） |
+| 24 h 稳态累计 CPU（`CPUUsageNSec`） | **≤ 1.5 s**（硬上限 2.0 s；v1.3.1 修复后现网预算 ≈ 1.5–1.6 s，与 RA 速率线性相关，见 §1.3） | **≤ 1.5 s**（硬上限 2.0 s） | ≤ 2.0 s | `systemctl show -p CPUUsageNSec`（生产 24 h）+ mock soak |
 | 24 h 稳态写请求数 | **0** | **0** | 0 | mock 集成 + 生产日志审计 |
 | 二进制体积（stripped） | **≤ 380 KB**（硬上限 500 KB） | **≤ 320 KB** | ≤ 500 KB | `stat -c %s` |
 
-> \* **musl 门禁校准原则**：因当前宿主机尚未实测 musl 静态包，M1 阶段须先以 Zig 0.13.0 构建 `0.0.1-rc2` musl 静态包并采集真实基线，再将上表带“待实测校准”的 musl 阈值锁定为实测基准值，避免拍脑袋定目标。
+> \* **musl 门禁校准原则**：因当前宿主机尚未实测 musl 静态包，M1 阶段须先以 Zig 0.13.0 构建 `0.0.1-rc2` musl 静态包并采集真实基线，再将上表带“待实测校准”的 musl 阈值锁定为实测基准值，避免拍脑袋定目标。校准已于 2026-11-27 在生产主机用 `0.0.1-rc3` 完成（见 §1.3）：阈值本身保持为 `soak.py` 门禁不变，括号内为现网实测值。
 
 ### 2.3 明确非目标（Non-goals）
 
@@ -193,6 +236,12 @@
    | `RTM_NEWADDR` / `RTM_DELADDR`（无关族/接口/标志） | 1. `AF_INET` 且 `ipv4_mode == MN_IP4_OFF`；<br>2. `AF_INET6` 且 `ipv6_mode == MN_IP6_OFF`；<br>3. `scope != RT_SCOPE_UNIVERSE`；<br>4. 接口名未通过 `mn_iface_allowed()`；<br>5. `RTM_NEWADDR` 含 `TENTATIVE` / `OPTIMISTIC` 或（`!allow_temporary_ipv6` 时的）`TEMPORARY`。 | 注意：**`ipv4_mode == MN_IP4_EXTERNAL` 或 `AUTO` 时不丢弃允许接口上的全局/私网 IPv4 变更**（DHCP 续租换 IP 仍触发）；`if_indextoname()` 失败时 **fail-open 视为 interesting**；`ENOBUFS`/`MSG_TRUNC` 无条件全量 resync。 |
    | `RTM_NEWLINK` / `RTM_DELLINK` | 先更新 `links[]`（`up` 与 `running`）；若接口通过 `mn_iface_allowed()`（或 `if_indextoname` 失败）且 **`up` 或 `running` 发生真实状态翻转（0↔1）** 或收到 `RTM_DELLINK` → 置 `interesting = 1` 且 **`*carrier_changed = 1`**。 | **保护 NAT 主机**：路由器重启/网线拔插触发 `IFF_RUNNING` 翻转必唤醒，同时屏蔽无状态变化的纯统计/bridge 噪声。 |
 
+4. **DEPRECATED 归一化（v1.3.1 勘误，`mn_nl_decode_addr()`）**：
+   - 解码 `AF_INET6` 地址时，若带 `IFA_CACHEINFO` 且 `ifa_prefered == 0`，则**无条件置 `IFA_F_DEPRECATED`**（只置位、不清除；`ifa_prefered > 0` 与 IPv4 不改写）。
+   - 原因见 §1.3：内核在每次 RA 生命周期更新时先清除 `IFA_F_DEPRECATED` 并发出第一条 `RTM_NEWADDR`，随后 `addrconf_verify()` 对 `prefered_lft == 0` 的地址重新置位并发出第二条；dump 路径（`inet6_fill_ifaddr()` 原样输出 `ifa->flags`）报告的是置位后的状态。归一化后事件与 dump 描述同一有效状态，上表第一条规则的 `crit_flags` 比较对这对消息恒成立。
+   - 真实转换仍触发：`preferred → deprecated`（无论内核是否带上 DEPRECATED 位，`ifa_prefered` 归零即改变指纹）与 `deprecated → preferred`（`ifa_prefered > 0` 且无 DEPRECATED 位，与指纹 `0x20` 不等）均置 `interesting`；`mn_detect_ipv6()`（`design §06.3`）经同一解码器，`preferred` 生命周期耗尽的地址一律按 deprecated 剔除。
+   - 单测 `tests/unit.c` 回放现网抓取的三消息突发（同一数据报内 `0x100`/`0x100`/`0x120`），修复前 `dr=1`（改前必红），修复后 `dr=0`。
+
 #### 5.2.2 第二级防线：`reason=event` 本地快照比对与退避语义（`src/main.c`）
 
 1. 在 `struct app` 维护约 120 B 的纯内存快照 `last_local_snap`：`{ int valid; int has_v4_iface; char v4_iface_ip[MN_IP_STRLEN]; int has_v6; char v6_ip[MN_IP_STRLEN]; uint64_t v4_if_sig; }`（`v4_if_sig` 对所有允许且 `IFF_UP` 接口的 IPv4 地址集合做 FNV-1a 哈希，感知 NAT 侧私有 IPv4 变化）；并维护 `int pending_carrier;`（在 debounce 窗口内只要任一事件产生 `carrier_changed = 1` 即置位，cycle 触发后清零）。
@@ -214,6 +263,7 @@
 2. **恢复 BearSSL 64 位默认 RSA 验签**（[`src/tls_http.c`](../src/tls_http.c) `tls_setup()`）：
    - 将 `br_x509_minimal_set_rsa(&t->xc, br_rsa_i31_pkcs1_vrfy)` 改为 `br_x509_minimal_set_rsa(&t->xc, br_rsa_pkcs1_vrfy_get_default())`；
    - 将 `br_x509_minimal_set_ecdsa(&t->xc, br_ec_get_default(), br_ecdsa_i31_vrfy_asn1)` 改为 `br_x509_minimal_set_ecdsa(&t->xc, br_ec_get_default(), br_ecdsa_vrfy_asn1_get_default())`。
+   - **边界（现网复测结论）**：64 位优化仅覆盖 RSA。vendored 的 BearSSL 0.6 与上游 0.6 发布版逐字节一致，其中**不存在** 64 位椭圆曲线实现（`ec_p256_m64` / `ec_c25519_m64` / `ecdsa_i62_*` 均为上游 0.6 之后未发布的代码），`br_ec_get_default()` 只能返回 `br_ec_all_m31`；`api.cloudflare.com` 使用 ECDSA 链（P-256 叶子与中间证书，根 GTS Root R4 为 P-384），因此单周期 CPU 的主体是 P-256/P-384 验签的固有成本（见 §1.3），不再追求本条原先估计的 −50%。
 3. **同 `(provider, name)` 双栈 `A + AAAA` 合并 discover（唯一拍板方案）**（[`src/json_util.c`](../src/json_util.c) / [`src/prov_cloudflare.c`](../src/prov_cloudflare.c) / [`src/provider.c`](../src/provider.c)）：
    - `mn_cycle()` 在进入记录循环前，统计各 `(provider_id, name)` 是否同时有已启用的 `A` 和 `AAAA` 记录；
    - 对于同时启用 `A` 和 `AAAA` 的 `(provider, name)`，Cloudflare provider 发起**单次** `GET /client/v4/zones/{zone_id}/dns_records?name={fqdn}&per_page=100`：
@@ -277,6 +327,8 @@
 | `VmPeak`（虚拟内存峰值） | 5,148 KiB | **~3.1–3.5 MiB** | **~750–1,100 KiB** | 消灭 2 MiB CA 映射与双重 256 KiB 配置读 |
 | 24 h 稳态累计 CPU | **27.0 s**（生产 74 h 均值） | **~0.8–1.2 s**（≤ 1.5 s） | **~0.8–1.2 s**（≤ 1.5 s） | `REQ-07` 消除 RA 风暴(-92%) + `REQ-08` 缓存/`i62`/合并(-50%) |
 
+**现网实测对照（rc3，见 §1.3）**：内存各项均落在或优于 musl 列的预计区间（`VmRSS` 520 KiB、`RssAnon` 168 KiB、`VmHWM` 520 KiB、`VmPeak` 780 KiB、`MemoryCurrent` 500 KiB），`[stack] Rss` 36 KiB 略高于预计；CPU 从 27.0 s 降至约 2.7 s/24 h（−90%），但高于预计的 0.8–1.2 s：单周期 11.4 ms 受 P-384 根证书验签限制，RA 速率约为设计假设的 1.7 倍，且 layer-1 漏判使每个 RA 仍耗 0.78 ms。v1.3.1 修复后的预算为 96 × 11.4 ms + 2,050 × ≤0.25 ms ≈ 1.5–1.6 s/24 h。
+
 ---
 
 <a name="s7" id="s7"></a>
@@ -312,6 +364,7 @@
    - 自动识别 `--version` 的 `libc=musl|glibc` 切换双轨阈值，并支持 `--mock-mode preload|netns|hosts`。
 2. **RA 刷新端到端压测（M2）**：
    - 在 `unshare -rn` 独立 netns 中创建 `dummy0` 并连续执行 `ip -6 addr change ... valid_lft ... preferred_lft ...` 模拟高频 RA（如每 1 s 刷新一次共 20 次），断言守护进程期间 `cycle` 与 TLS 握手增量 **= 0**，而执行 `ip -6 addr add`（新地址）或 `ip link set dummy0 down/up` 时在 ≤ 3 s 内准确触发。
+      - **局限（v1.3.1）**：`ip -6 addr change` 走 `inet6_addr_modify()`，只发一条带 DEPRECATED 的通知，**无法复现**内核 RA 路径的“清除/重置 DEPRECATED”消息对；该场景由 `tests/unit.c` 的三消息回放单测守护（§5.2.1 第 4 条）。
 3. **生产主机复测项（明确与 mock 环境解耦）**：
    - mock 环境验证内存门禁、零写入、RA 零唤醒与双栈握手减半；
    - **单周期绝对耗时（22.5 ms → 8–12 ms）**、**glibc 真实 DNS/TLS 常驻 `MemoryCurrent`** 与 **24 h 真实 `CPUUsageNSec ≤ 1.5 s`** 在生产主机复测闭环。
@@ -330,6 +383,7 @@
 | **V1.3-M2：CPU 治理（优先止血）** | `REQ-07`、`REQ-08` | `nl_addr` 跟踪 `IFF_UP\|IFF_RUNNING` + 地址指纹表拦截 RA 刷新 + 无关接口过滤；`main` 二级本地快照比对（`carrier_changed` 绕过、跳过保退避）；`provider` 按族缓存 detect；`tls_http` 恢复 `i62` 默认 RSA 验签；`prov_cloudflare` 双栈 `A+AAAA` 合并 discover（含 `total_pages > 1` 回退）；`cycle end` 追加 `reason=`/`tls=`；同步回写 `design §05.2/§05.3/§05.4/§07.3/§08.1` | ① `socketpair` 单测与 `unshare` RA 压测 0 次多余 TLS 握手；② NAT `IFF_RUNNING` 翻转秒级触发；③ 双栈同域名每轮仅 1 次 Cloudflare discover；④ `test` / `test-asan` / `spec-check` 全绿；⑤ 生产复测 24 h 折算 CPU ≤ 1.5 s |
 | **V1.3-M3：I/O 峰值消灭与堆治理** | `REQ-02`、`REQ-03`、`REQ-06` | `mn_checked_open()`；CA 4 KiB 流式解析 + `dn` 复用 + `1.5×` 扩容；token 576 B 栈读首行；配置单次精确读取；glibc `mallopt` + `malloc_trim(0)`；同步回写 `design §09.1/§09.2` | ① `soak.py` glibc `RssAnon` 从 644 KiB 降至 ≤ 420 KiB、`VmPeak` 降幅 ≥ 1.5 MiB；② 1 B/7 B/4096 B CA 跨块与 TOCTOU 单测全绿；③ `test-asan` + `valgrind` 零泄漏 |
 | **V1.3-M4：栈物理驻留瘦身与收尾** | `REQ-04`、`REQ-05` | `struct app`、32 KiB netlink 缓冲、`struct mn_tls` 离栈（清零释放）并收窄局部头缓冲；`mn_addr_set` 周期化；HTTP 原地解析；按实测决定是否做 P2 项；同步回写 `design §08.1`、执行 `make doc` 与 `CHANGELOG.md` 更新 | ① `soak.py` 双轨门禁全绿（glibc `smaps [stack] Rss ≤ 32 KiB`、`RssAnon ≤ 320 KiB`、`VmRSS ≤ 2,458 KiB`；musl 达校准门禁）；② `test` / `test-asan` / `valgrind` / `spec-check` / `verify-units` 全绿；③ 8 平台 `make dist` 通过 |
+| **V1.3.1：layer-1 DEPRECATED 归一化（勘误）** | `REQ-07` | `mn_nl_decode_addr()` 对 `ifa_prefered == 0` 的 IPv6 地址置 `IFA_F_DEPRECATED`，消除内核“清除/重置 DEPRECATED”消息对造成的逐 RA 漏判（§1.3）；单测回放现网三消息突发 | ① 新增单测修复前必红、修复后全绿；② `test` / `test-asan` / `spec-check` 全绿；③ 生产复测：RA 突发后不再出现 `debounce_ms` 之后的第二段活动，24 h 折算 CPU ≤ 2.0 s |
 
 ---
 
@@ -347,3 +401,4 @@
 | `-Os` 降低 BearSSL 大数运算速度导致单次 TLS 握手 CPU 升高 | 低 | 拆出 `OPT_VENDOR ?= -O2`，M1 实测 `-Os` vs `-O2` 握手耗时与二进制大小后再定型 |
 | `mallopt(M_MMAP_THRESHOLD, 16384)` 在非 glibc 平台不可编译 | 低 | 严格隔离在 `#if defined(__GLIBC__)` 内，musl 路径零依赖 |
 | 独立 netns (`unshare -rmn`) 在部分受限容器/CI runner 被禁 | 低 | `soak.py` 同时提供 `--mock-mode hosts` 回退路径（CI 使用 `sudo` 临时写 `/etc/hosts` + 443 端口） |
+| 内核事件通知与 dump 路径对同一地址报告的 `IFA_FLAGS` 不一致（RA 更新时先清除再重置 DEPRECATED） | 高 | 解码时按 `ifa_prefered == 0` 归一化 DEPRECATED（§5.2.1 第 4 条），并用现网抓取的三消息突发做回归单测；生产验证以 `/proc/<pid>/syscall` 时间对齐确认不再触发 debounce |

@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- netlink: normalise `IFA_F_DEPRECATED` from `IFA_CACHEINFO.ifa_prefered == 0` for IPv6 addresses (spec v1.3.1). The kernel clears the flag before the first `RTM_NEWADDR` of every RA lifetime update and re-sets it in `addrconf_verify()`, so the transient message missed the layer-1 fingerprint and armed the debounce on each RA (measured on the production host: about 0.8 ms plus a rescan per RA, ~87 RA/h). A unit test now replays the captured three-message burst.
 - daemon: schedule retries after the boot cycle (including clock-guard 30 s retries) and install signals before boot; the first backoff step is now really 5 s.
 - daemon: ignore and log SIGHUP, handle poll/signalfd/timerfd errors, and remove duplicate overflow resync/logging.
 - config/CLI: explicit missing `-c` paths and config errors return the documented exit codes; `--config=` is rejected; `$LOGS_DIRECTORY/` is expanded for `log_file`; FQDN trailing dots and empty external echo URLs are rejected.
@@ -20,6 +21,7 @@
 
 ### Changed
 
+- docs: spec v1.3.1 amendment; musl gates calibrated from the rc3 production host (`VmRSS` 520 KiB, `RssAnon` 168 KiB, `VmPeak` 780 KiB); documented that cgroup `MemoryPeak` on systemd >= 254 includes `systemd-executor`, the per-cycle cost breakdown (ECDSA chain with a P-384 root) and the RA-rate dependent 24 h CPU budget.
 - v1.3 CPU & memory governance (`docs/design-v1.3-baseline.md`, synced to `docs/design.md`):
   - Netlink layer-1 filter (`mn_nl_drain_filtered`) suppresses IPv6 RA `IFA_CACHEINFO` lifetime refreshes and excluded/non-global/tentative/temporary noise while preserving allowed-interface `IFF_UP`/`IFF_RUNNING` carrier flips for NAT hosts; layer-2 local snapshot diff skips spurious `reason=event` cycles without perturbing retry backoff state.
   - Per-cycle IP detection family caching (`mn_detect_ipv4`/`mn_detect_ipv6`), BearSSL default 64-bit RSA/ECDSA verification (`i62`), and Cloudflare dual-stack `A+AAAA` single-cycle discover consolidation (`per_page=100` with automatic typed fallback on `total_pages > 1`); `cycle end` now appends `reason=` and `tls=`.
